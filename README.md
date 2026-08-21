@@ -1,53 +1,31 @@
 # OrcaMóvel 🪵
 
-Agente IA para orçamento de móveis planejados.
+Agente IA para orçamento de móveis planejados e marcenaria de alto padrão.
 
-## Deploy na Vercel
+## Deploy na Vercel (Recomendado)
 
-### Opção 1 — CLI (mais simples)
-1. `npm install -g vercel`
-2. Na pasta do projeto: `vercel` (preview) ou `vercel --prod` (produção)
-3. A Vercel detecta automaticamente que é um projeto Vite (build `npm run build`,
-   saída em `dist`) e também publica tudo que estiver em `api/` como serverless
-   functions — não precisa de `vercel.json` para isso.
+### Opção 1 — GitHub + Vercel (Automático)
+1. Suba este projeto para o seu repositório GitHub (`apolicardo69-beep/orcamovel`).
+2. Em [vercel.com](https://vercel.com): **Import Project** selecionando o repositório.
+3. Framework Preset: **Vite** (detectado automaticamente).
+4. No painel da Vercel: **Settings → Environment Variables**:
+   - `OPENROUTER_API_KEY` = `sk-or-...` (sua chave da OpenRouter protegida no servidor)
+5. Clique em **Deploy**.
 
-### Opção 2 — GitHub + Vercel (recomendado)
-1. Suba este projeto para um repositório GitHub
-2. Em [vercel.com](https://vercel.com): **Add New → Project → Import** o repositório
-3. Framework preset: **Vite** (detectado automaticamente)
-4. Clique em **Deploy**
-
-## Chave de API pré-configurada no servidor (opcional)
-Se quiser que os usuários não precisem colar a própria chave, configure uma chave do
-servidor que fica protegida numa Vercel Serverless Function (`api/analyze.js`) — ela
-NUNCA é enviada ao navegador.
-
-No painel da Vercel → **Project → Settings → Environment Variables**:
-```
-OPENROUTER_API_KEY = sk-or-xxxxxxxx
-```
-
-**Importante:** essa variável não deve ter o prefixo `VITE_`. Qualquer variável
-`VITE_*` é embutida pelo Vite diretamente no JavaScript enviado ao navegador — ou
-seja, ficaria visível a qualquer visitante do site pelo DevTools. `OPENROUTER_API_KEY`
-(sem `VITE_`) só é lida dentro de `api/analyze.js`, do lado do servidor — o código do
-navegador nunca a vê.
-
-Se não configurar essa variável, cada usuário insere a própria chave na interface
-(⚙️ API key, canto superior direito) — ela fica só no navegador dele.
-
-### Testando a function localmente
+### Opção 2 — CLI da Vercel
 ```bash
 npm install -g vercel
-vercel dev
+vercel --prod
 ```
-Isso roda o Vite e as functions de `api/` juntos, simulando o ambiente da Vercel
-(rodar só `npm run dev` não expõe `/api/analyze` — para isso é preciso `vercel dev`).
 
-## Desenvolvimento local
+## Configuração da Chave de API
+- **No Servidor (Vercel)**: Defina a variável de ambiente `OPENROUTER_API_KEY` no painel da Vercel. A serverless function em `api/analyze.js` utilizará essa chave de forma 100% segura sem expor ao navegador dos clientes.
+- **No Navegador (Pessoal)**: Caso não configure no servidor, o usuário pode inserir sua própria chave clicando em **⚙️ API key** no topo do aplicativo.
+
+## Desenvolvimento Local
 ```bash
 npm install
 npm run dev
 ```
 
-Acesse: http://localhost:5173
+Acesse em: `http://localhost:5173`
