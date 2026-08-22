@@ -1,4 +1,5 @@
 import { useState, useRef, useMemo } from "react";
+import { jsPDF } from "jspdf";
 import PlanoCorteView from "./components/PlanoCorteView";
 
 // Limiar para alertar o usuário sobre PDFs com muitas páginas
@@ -530,18 +531,8 @@ export default function App() {
   };
 
   // Gerador de Proposta Comercial Profissional em PDF com Separação por Ambiente
-  const generatePDF = async () => {
+  const generatePDF = () => {
     try {
-      if (!window.jspdf) {
-        await new Promise((res, rej) => {
-          const s = document.createElement("script");
-          s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
-          s.onload = res;
-          s.onerror = rej;
-          document.head.appendChild(s);
-        });
-      }
-      const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
       const q = calcQuote();
       const PW = 210;
@@ -554,11 +545,13 @@ export default function App() {
       const gr = [110, 100, 90];
       const bgLight = [248, 244, 238];
 
-      // Sanitiza textos para compatibilidade total com jsPDF (remove emojis)
+      // Sanitiza textos para compatibilidade total com jsPDF (remove emojis e caracteres especiais)
       const cleanTxt = (t) => {
         if (!t) return "";
         return String(t)
-          .replace(/[^\x20-\x7E\xA0-\xFF]/g, " ")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^\x20-\x7E]/g, " ")
           .replace(/\s+/g, " ")
           .trim();
       };
@@ -757,13 +750,30 @@ export default function App() {
       doc.text("CONTRATADA (Marcenaria)", mg + 10 + signW / 2, y + 4, { align: "center" });
       doc.text("DE ACORDO - CLIENTE", PW - mg - 10 - signW / 2, y + 4, { align: "center" });
 
-      // Salvar arquivo
+      // Salvar arquivo garantindo a extensão .pdf
       const fn = (clientName || "orcamento_marcenaria")
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^a-zA-Z0-9]/g, "_")
         .toLowerCase();
-      doc.save(`proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`);
+      const safeFileName = `proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`;
+
+      // Exporta como Blob application/pdf e força download
+      const pdfBlob = doc.output("blob");
+      const safeBlob = new Blob([pdfBlob], { type: "application/pdf" });
+      const blobUrl = URL.createObjectURL(safeBlob);
+
+      const link = document.createElement("a");
+      link.style.display = "none";
+      link.href = blobUrl;
+      link.setAttribute("download", safeFileName);
+      document.body.appendChild(link);
+      link.click();
+
+      setTimeout(() => {
+        if (link.parentNode) link.parentNode.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+      }, 3000);
     } catch (pdfErr) {
       alert("Erro ao gerar PDF: " + pdfErr.message);
     }
