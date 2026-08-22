@@ -2,7 +2,6 @@
 // A chave do servidor fica segura em OPENROUTER_API_KEY e nunca é enviada ao navegador.
 
 export default async function handler(req, res) {
-  // Configuração CORS básica para Vercel
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,PATCH,DELETE,POST,PUT");
@@ -48,8 +47,8 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Modelos recomendados para visão em OpenRouter
-  const selectedModel = model || "anthropic/claude-3.5-sonnet";
+  // Modelo padrão mais avançado: Claude 3.7 Sonnet
+  const selectedModel = model || "anthropic/claude-3.7-sonnet";
 
   try {
     const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {

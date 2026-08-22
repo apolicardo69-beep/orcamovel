@@ -136,6 +136,7 @@ export default function App() {
   const [newRule, setNewRule] = useState({ category: "Armário/Guarda-roupa", label: "", unit: "m²", price: "", note: "" });
   const [showAddExample, setShowAddExample] = useState(false);
   const [newExample, setNewExample] = useState({ label: "", ambiente: "", dimensoes: "", descricao: "", calculo: "", total: "" });
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("om_model") || "anthropic/claude-3.7-sonnet");
   const [analyzingProgress, setAnalyzingProgress] = useState(null); // { current, total, pageInfo }
   
   const abortControllerRef = useRef(null);
@@ -304,7 +305,7 @@ export default function App() {
 
       const body = usePersonalKey
         ? JSON.stringify({
-            model: "anthropic/claude-3.5-sonnet",
+            model: selectedModel,
             max_tokens: maxTokens,
             temperature: 0.1,
             messages: [
@@ -323,7 +324,7 @@ export default function App() {
             imageDataUrl,
             instruction,
             maxTokens,
-            model: "anthropic/claude-3.5-sonnet",
+            model: selectedModel,
           });
 
       let resp;
@@ -872,8 +873,28 @@ export default function App() {
                       openrouter.ai/keys
                     </a>
                   </div>
+
+                  <div style={{ borderTop: "1px solid #2a1c0e", paddingTop: 10, marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, color: "#a08050", fontWeight: 600, marginBottom: 5 }}>
+                      Modelo de IA para Leitura:
+                    </div>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => {
+                        setSelectedModel(e.target.value);
+                        localStorage.setItem("om_model", e.target.value);
+                      }}
+                      style={{ ...IS, fontSize: 12 }}
+                    >
+                      <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet (Mais Recente & Preciso)</option>
+                      <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet (Rápido e Estável)</option>
+                      <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (Ultra Rápido)</option>
+                      <option value="openai/gpt-4o">GPT-4o (OpenAI)</option>
+                    </select>
+                  </div>
+
                   <div style={{ fontSize: 11, color: "#5a4430", lineHeight: 1.4, borderTop: "1px solid #2a1c0e", paddingTop: 8 }}>
-                    💡 Se deixar em branco, o app usará a chave configurada no servidor na Vercel (<code>OPENROUTER_API_KEY</code>).
+                    💡 Se deixar a chave em branco, o app usará a chave configurada no servidor na Vercel (<code>OPENROUTER_API_KEY</code>).
                   </div>
                   <button
                     onClick={() => setShowKeyInput(false)}
