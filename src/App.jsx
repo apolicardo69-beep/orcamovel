@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import PlanoCorteView from "./components/PlanoCorteView";
 
 // Limiar para alertar o usuário sobre PDFs com muitas páginas
@@ -79,8 +79,8 @@ const buildSystemPrompt = (rules, examples) => {
 ${ruleLines}
 
 ## PADRÕES E DIRETRIZES:
-- Acabamento interno padrão: MDF Branco Texturizado
-- Portas de correr: corrediça telescópica sistema RO45 Rometal
+- **IDENTIFICAÇÃO DO PROJETO:** Se houver carimbo/selo técnico na prancha, extraia o nome do cliente, endereço da obra e arquiteto/empresa.
+- **SEPARAÇÃO POR AMBIENTE:** Cada móvel/peça DEVE ter o campo "ambiente" preenchido com o nome exato do cômodo/ambiente onde ele será instalado (ex: "Sala de Estar", "Cozinha", "Suíte Master", "Dormitório 01", "Lavanderia", etc.).
 - **REGRA DE PORTAS:** O preço de R$1.250/m² do armário JÁ INCLUI as portas de correr em MDF. Cobrar R$900 SOMENTE por cada porta adicional que for ESPELHO. Porta MDF normal não é cobrada separada.
 - Armários em geral: Altura × Largura = m², depois × preço/m²
 - Painéis em L, U, C: desmembrar em retângulos separados para o cálculo exato.
@@ -89,14 +89,17 @@ ${ruleLines}
 ## EXEMPLOS REAIS:
 ${exLines}
 
-## FORMATO DE RETORNO OBRIGATÓRIO:
-Retorne APENAS um objeto JSON válido (sem texto explicativo antes ou depois):
+## FORMATO DE RETORNO OBRIGATÓRIO (JSON PURO):
 {
-  "ambiente": "Nome do ambiente",
-  "descricao": "Breve resumo do móvel identificado",
+  "cliente": "Nome do cliente (se visível no carimbo)",
+  "endereco": "Endereço da obra (se visível)",
+  "arquiteto": "Nome do arquiteto/empresa (se visível)",
+  "ambiente": "Ambiente principal desta página",
+  "descricao": "Resumo dos móveis identificados",
   "formasCompostas": ["Peças em L/U/C detectadas"],
   "pecas": [
     {
+      "ambiente": "Nome do Ambiente (ex: Sala de Estar)",
       "nome": "Descrição da peça",
       "tipo": "m²",
       "largura": 2.20,
@@ -124,8 +127,18 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState(null);
   const [formasCompostas, setFormasCompostas] = useState([]);
   const [pieces, setPieces] = useState([]);
-  const [ambientDesc, setAmbientDesc] = useState("");
+  
+  // Informações do Cliente & Proposta Comercial
   const [clientName, setClientName] = useState("");
+  const [clientAddress, setClientAddress] = useState("");
+  const [clientPhone, setClientPhone] = useState("");
+  const [architectName, setArchitectName] = useState("");
+  const [ambientDesc, setAmbientDesc] = useState("");
+  const [paymentTerms, setPaymentTerms] = useState("50% de entrada no fechamento + 50% na conclusão da montagem");
+  const [deliveryDeadline, setDeliveryDeadline] = useState("35 a 45 dias úteis após conferência técnica");
+  const [showClientModal, setShowClientModal] = useState(false);
+  const [filterAmbiente, setFilterAmbiente] = useState("todos");
+
   const [history, setHistory] = useState(() => lsGet("om_history_v2", []));
   const [expandedHistory, setExpandedHistory] = useState(null);
   const [savedBanner, setSavedBanner] = useState(false);
@@ -147,7 +160,27 @@ export default function App() {
   const saveExamples = (e) => { setExamples(e); lsSet("om_examples_v1", e); };
   const saveHistory = (h) => { setHistory(h); lsSet("om_history_v2", h); };
 
-  // Otimização de Imagem em Canvas (mantém cotas e medidas nítidas em arquivo ultra leve)
+  // Lista de Ambientes únicos nas peças
+  const ambientesDisponiveis = useMemo(() => {
+    const setAmb = new Set();
+    pieces.forEach((p) => {
+      if (p.ambiente && p.ambiente.trim()) setAmb.add(p.ambiente.trim());
+    });
+    return Array.from(setAmb);
+  }, [pieces]);
+
+  // Peças agrupadas por Ambiente
+  const pecasPorAmbiente = useMemo(() => {
+    const grupos = {};
+    pieces.forEach((p) => {
+      const amb = (p.ambiente && p.ambiente.trim()) ? p.ambiente.trim() : "Ambiente Geral";
+      if (!grupos[amb]) grupos[amb] = [];
+      grupos[amb].push(p);
+    });
+    return grupos;
+  }, [pieces]);
+
+  // Otimização de Imagem em Canvas
   const resizeImageToDataUrl = (img, maxDimension = 1600, quality = 0.82) => {
     let { width, height } = img;
     if (width > maxDimension || height > maxDimension) {
@@ -169,7 +202,7 @@ export default function App() {
     return canvas.toDataURL("image/jpeg", quality);
   };
 
-  // Conversão de PDF Otimizada para Celular e Computador
+  // Conversão de PDF Otimizada
   const pdfToImages = async (arrayBuffer) => {
     if (!window.pdfjsLib) {
       await new Promise((res, rej) => {
@@ -352,7 +385,6 @@ export default function App() {
             throw new Error("Cole sua chave OpenRouter no menu ⚙️ Configurar IA acima.");
           }
           lastErr = new Error(errMsg);
-          // Se este modelo falhou (ex: sem endpoints), tenta o próximo modelo da lista
           continue;
         }
 
@@ -428,11 +460,19 @@ export default function App() {
       const pageLabel = total > 1 ? `página ${pageNum}/${allImages.length}` : "o projeto";
       const instruction =
         total > 1
-          ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Extraia móveis, cotas e medidas desta página. Retorne SOMENTE o JSON. Se esta for uma capa ou texto descritivo sem móveis cotados, retorne "pecas": [].`
-          : `Analise este projeto técnico de móveis planejados e retorne SOMENTE o JSON com todas as peças, cotas e preços calculados conforme as regras.`;
+          ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Extraia móveis, cotas e medidas desta página. Identifique o ambiente específico de cada móvel no campo 'ambiente' (ex: 'Sala de Estar', 'Cozinha', 'Suíte', etc.). Se houver carimbo/selo com nome do cliente, endereço e arquiteto, extraia também. Retorne SOMENTE o JSON.`
+          : `Analise este projeto técnico de móveis planejados. Extraia peças, cotas e separe por ambiente no campo 'ambiente'. Se houver carimbo, extraia nome do cliente, endereço e arquiteto. Retorne SOMENTE o JSON.`;
 
       try {
         const parsed = await requestPageAnalysis(systemPrompt, img, instruction, pageLabel, abortController.signal);
+        
+        // Auto-preenchimento das informações do cliente e projeto
+        if (parsed.cliente && !clientName) setClientName(parsed.cliente);
+        if (parsed.endereco && !clientAddress) setClientAddress(parsed.endereco);
+        if (parsed.arquiteto && !architectName) setArchitectName(parsed.arquiteto);
+
+        const pageAmbiente = parsed.ambiente || `Ambiente ${pageNum}`;
+
         if (parsed.pecas && Array.isArray(parsed.pecas)) {
           const formatted = parsed.pecas.map((p) => {
             const larg = parseFloat(p.largura) || 0;
@@ -444,6 +484,7 @@ export default function App() {
               ...p,
               _id: nextId++,
               _pagina: pageNum,
+              ambiente: p.ambiente || pageAmbiente,
               largura: larg,
               altura: alt,
               quantidade: qtd,
@@ -472,7 +513,7 @@ export default function App() {
         `${newPieces.length} peça(s) extraída(s). Houve falha na leitura de ${failedPages.length} página(s) (${failedPages[0].error}).`
       );
     } else if (newPieces.length === 0) {
-      setAnalysisError("Nenhuma peça com cotas foi identificada nesta página (se for capa ou memorial, mude para a página com o desenho do móvel e tente novamente).");
+      setAnalysisError("Nenhuma peça com cotas foi identificada nesta página. Mude para a página com o desenho do móvel cotado e tente novamente.");
     }
 
     setIsAnalyzing(false);
@@ -488,6 +529,7 @@ export default function App() {
     executeAnalysis(onlyCurrentPage);
   };
 
+  // Gerador de Proposta Comercial Profissional em PDF com Separação por Ambiente
   const generatePDF = async () => {
     if (!window.jspdf) {
       await new Promise((res, rej) => {
@@ -502,156 +544,211 @@ export default function App() {
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const q = calcQuote();
     const PW = 210;
-    const mg = 15;
+    const PH = 297;
+    const mg = 14;
     const col = PW - mg * 2;
-    let y = 20;
+    let y = 16;
     const gold = [200, 137, 42];
-    const dark = [30, 20, 10];
-    const gr = [100, 90, 80];
+    const dark = [26, 20, 14];
+    const gr = [110, 100, 90];
+    const bgLight = [248, 244, 238];
 
-    // Header dourado elegante
+    // 1. Cabeçalho de Luxo
     doc.setFillColor(...gold);
-    doc.rect(0, 0, PW, 28, "F");
+    doc.rect(0, 0, PW, 24, "F");
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(20);
+    doc.setFontSize(18);
     doc.setFont("helvetica", "bold");
-    doc.text("OrcaMóvel", mg, 12);
+    doc.text("OrcaMóvel", mg, 11);
+    doc.setFontSize(7.5);
+    doc.setFont("helvetica", "normal");
+    doc.text("MARCENARIA DE ALTO PADRÃO · PROPOSTA TÉCNICA COMERCIAL", mg, 17);
+    
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "bold");
+    doc.text(`PROPOSTA Nº ${String(Date.now()).slice(-6)}`, PW - mg, 11, { align: "right" });
     doc.setFontSize(8);
     doc.setFont("helvetica", "normal");
-    doc.text("AGENTE IA · MÓVEIS PLANEJADOS", mg, 18);
-    doc.setFontSize(9);
-    doc.text("ORÇAMENTO TÉCNICO", PW - mg, 12, { align: "right" });
-    doc.text(new Date().toLocaleDateString("pt-BR"), PW - mg, 18, { align: "right" });
-    y = 38;
+    doc.text(`Emissão: ${new Date().toLocaleDateString("pt-BR")} · Validade: 15 dias`, PW - mg, 17, { align: "right" });
+    y = 32;
 
-    // Bloco cliente / ambiente
-    doc.setFillColor(245, 240, 230);
-    doc.rect(mg, y - 5, col, 18, "F");
+    // 2. Bloco do Cliente e Projeto
+    doc.setFillColor(...bgLight);
+    doc.rect(mg, y - 4, col, 22, "F");
+    doc.setDrawColor(220, 205, 185);
+    doc.rect(mg, y - 4, col, 22, "S");
+
     doc.setTextColor(...dark);
-    doc.setFontSize(9);
-    doc.setFont("helvetica", "bold");
-    doc.text("CLIENTE", mg + 4, y + 1);
-    doc.setFont("helvetica", "normal");
-    doc.text(clientName || "Cliente", mg + 4, y + 7);
-    doc.setFont("helvetica", "bold");
-    doc.text("AMBIENTE", mg + col / 2, y + 1);
-    doc.setFont("helvetica", "normal");
-    doc.text(ambientDesc || "Projeto Geral", mg + col / 2, y + 7);
-    y += 24;
-
-    // Cabeçalho da tabela
-    doc.setFillColor(...gold);
-    doc.rect(mg, y, col, 8, "F");
-    doc.setTextColor(255, 255, 255);
     doc.setFontSize(8);
     doc.setFont("helvetica", "bold");
-    doc.text("PEÇA", mg + 2, y + 5.5);
-    doc.text("TIPO", mg + 78, y + 5.5);
-    doc.text("DIM.", mg + 96, y + 5.5);
-    doc.text("QTD", mg + 118, y + 5.5);
-    doc.text("R$/UN", mg + 130, y + 5.5);
-    doc.text("SUBTOTAL", PW - mg - 2, y + 5.5, { align: "right" });
-    y += 10;
-
-    // Linhas de peças
+    doc.text("CLIENTE:", mg + 4, y + 2);
     doc.setFont("helvetica", "normal");
-    q.lines.forEach((l, i) => {
-      if (y > 260) {
-        doc.addPage();
-        y = 20;
-      }
-      if (i % 2 === 0) {
-        doc.setFillColor(252, 248, 240);
-        doc.rect(mg, y - 1, col, 8, "F");
-      }
-      doc.setTextColor(...dark);
-      doc.setFontSize(8);
-      const nome = l.nome.length > 38 ? l.nome.slice(0, 35) + "..." : l.nome;
-      doc.text(nome, mg + 2, y + 4.5);
-      doc.text(l.tipo || "m²", mg + 78, y + 4.5);
-      const dim =
-        l.tipo === "m²"
-          ? (parseFloat(l.largura) || 0).toFixed(2) + "×" + (parseFloat(l.altura) || 0).toFixed(2)
-          : "—";
-      doc.text(dim, mg + 96, y + 4.5);
-      doc.text(String(l.quantidade || 1), mg + 120, y + 4.5);
-      doc.text(
-        "R$" +
-          (l.precoUnitario || 0).toLocaleString("pt-BR", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          }),
-        mg + 130,
-        y + 4.5
-      );
+    doc.text(clientName || "Cliente", mg + 22, y + 2);
+
+    doc.setFont("helvetica", "bold");
+    doc.text("ENDEREÇO:", mg + 4, y + 8);
+    doc.setFont("helvetica", "normal");
+    doc.text(clientAddress || "Conforme projeto aprovado", mg + 25, y + 8);
+
+    if (architectName) {
       doc.setFont("helvetica", "bold");
+      doc.text("ARQUITETO(A):", mg + 4, y + 14);
+      doc.setFont("helvetica", "normal");
+      doc.text(architectName, mg + 28, y + 14);
+    } else {
+      doc.setFont("helvetica", "bold");
+      doc.text("AMBIENTES:", mg + 4, y + 14);
+      doc.setFont("helvetica", "normal");
+      doc.text(ambientDesc || "Projeto Geral", mg + 24, y + 14);
+    }
+
+    doc.setFont("helvetica", "bold");
+    doc.text("TELEFONE:", mg + col / 2 + 10, y + 2);
+    doc.setFont("helvetica", "normal");
+    doc.text(clientPhone || "—", mg + col / 2 + 30, y + 2);
+
+    doc.setFont("helvetica", "bold");
+    doc.text("PRAZO:", mg + col / 2 + 10, y + 8);
+    doc.setFont("helvetica", "normal");
+    doc.text(deliveryDeadline, mg + col / 2 + 25, y + 8);
+
+    y += 26;
+
+    // 3. Tabela Agrupada por AMBIENTE
+    const checkPageBreak = (neededHeight) => {
+      if (y + neededHeight > PH - 35) {
+        doc.addPage();
+        y = 18;
+      }
+    };
+
+    const ambientes = Object.keys(pecasPorAmbiente);
+
+    ambientes.forEach((ambNome, ambIdx) => {
+      const pecasDoAmbiente = pecasPorAmbiente[ambNome];
+      const subtotalAmb = pecasDoAmbiente.reduce((acc, p) => acc + calcLine(p), 0);
+
+      checkPageBreak(25);
+
+      // Header do Ambiente
+      doc.setFillColor(34, 26, 18);
+      doc.rect(mg, y, col, 7.5, "F");
+      doc.setTextColor(232, 170, 64);
+      doc.setFontSize(8.5);
+      doc.setFont("helvetica", "bold");
+      doc.text(`📍 AMBIENTE: ${ambNome.toUpperCase()}`, mg + 3, y + 5);
       doc.text(
-        "R$" +
-          l.lineTotal.toLocaleString("pt-BR", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          }),
-        PW - mg - 2,
-        y + 4.5,
+        `Subtotal: ${fmtBRL(subtotalAmb)}`,
+        PW - mg - 3,
+        y + 5,
         { align: "right" }
       );
-      doc.setFont("helvetica", "normal");
-      y += 8;
+      y += 8.5;
+
+      // Cabeçalho da tabela de itens
+      doc.setFillColor(...gold);
+      doc.rect(mg, y, col, 6.5, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(7.5);
+      doc.setFont("helvetica", "bold");
+      doc.text("ITEM / DESCRIÇÃO", mg + 2, y + 4.5);
+      doc.text("TIPO", mg + 76, y + 4.5);
+      doc.text("MEDIDAS (m)", mg + 94, y + 4.5);
+      doc.text("QTD", mg + 116, y + 4.5);
+      doc.text("VALOR UNIT.", mg + 128, y + 4.5);
+      doc.text("SUBTOTAL", PW - mg - 2, y + 4.5, { align: "right" });
+      y += 7.5;
+
+      // Linhas do Ambiente
+      pecasDoAmbiente.forEach((l, i) => {
+        checkPageBreak(8);
+
+        if (i % 2 === 0) {
+          doc.setFillColor(252, 248, 242);
+          doc.rect(mg, y - 1, col, 7, "F");
+        }
+        doc.setTextColor(...dark);
+        doc.setFontSize(7.5);
+        doc.setFont("helvetica", "normal");
+        const nome = l.nome.length > 40 ? l.nome.slice(0, 38) + "..." : l.nome;
+        doc.text(nome, mg + 2, y + 4);
+        doc.text(l.tipo || "m²", mg + 76, y + 4);
+        const dim =
+          l.tipo === "m²"
+            ? (parseFloat(l.largura) || 0).toFixed(2) + " × " + (parseFloat(l.altura) || 0).toFixed(2)
+            : "—";
+        doc.text(dim, mg + 94, y + 4);
+        doc.text(String(l.quantidade || 1), mg + 118, y + 4);
+        doc.text(fmtBRL(l.precoUnitario || 0), mg + 128, y + 4);
+        doc.setFont("helvetica", "bold");
+        doc.text(fmtBRL(calcLine(l)), PW - mg - 2, y + 4, { align: "right" });
+        doc.setFont("helvetica", "normal");
+        y += 7;
+      });
+
+      y += 4;
     });
 
-    y += 4;
+    // 4. Totais e Fechamento Comercial
+    checkPageBreak(50);
     doc.setDrawColor(...gold);
     doc.setLineWidth(0.5);
     doc.line(mg, y, PW - mg, y);
-    y += 8;
+    y += 6;
 
-    // Linhas de totais
-    const row = (lbl, val, bold = false) => {
+    const rowTotal = (lbl, val, bold = false) => {
       doc.setFont("helvetica", bold ? "bold" : "normal");
-      doc.setFontSize(9);
+      doc.setFontSize(8.5);
       doc.setTextColor(...gr);
-      doc.text(lbl, PW - mg - 60, y);
+      doc.text(lbl, PW - mg - 65, y);
       doc.setTextColor(...dark);
-      doc.text(
-        "R$" +
-          val.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        PW - mg - 2,
-        y,
-        { align: "right" }
-      );
-      y += 7;
+      doc.text(fmtBRL(val), PW - mg - 2, y, { align: "right" });
+      y += 6;
     };
-    row("Subtotal materiais", q.subtotal);
-    if (q.marginVal > 0) row("Margem (" + margin + "%)", q.marginVal);
+
+    rowTotal("Subtotal dos Ambientes", q.subtotal);
+    if (q.marginVal > 0) rowTotal(`Margem Comercial (${margin}%)`, q.marginVal);
 
     y += 2;
     doc.setFillColor(...gold);
-    doc.rect(PW - mg - 82, y - 5, 82, 13, "F");
+    doc.rect(PW - mg - 84, y - 4, 84, 11, "F");
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("TOTAL GERAL", PW - mg - 81, y + 3.5);
     doc.setFontSize(11);
-    doc.text("TOTAL", PW - mg - 80, y + 3.5);
-    doc.setFontSize(12);
-    doc.text(
-      "R$" +
-        q.total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      PW - mg - 2,
-      y + 3.5,
-      { align: "right" }
-    );
+    doc.text(fmtBRL(q.total), PW - mg - 2, y + 3.5, { align: "right" });
+    y += 15;
 
-    // Rodapé informativo
+    // 5. Termos Comerciais e Assinatura
+    checkPageBreak(30);
+    doc.setFillColor(...bgLight);
+    doc.rect(mg, y - 2, col, 20, "F");
+    doc.setTextColor(...dark);
+    doc.setFontSize(7.5);
+    doc.setFont("helvetica", "bold");
+    doc.text("CONDIÇÕES COMERCIAIS & GARANTIA:", mg + 3, y + 3);
+    doc.setFont("helvetica", "normal");
+    doc.text(`• Pagamento: ${paymentTerms}`, mg + 3, y + 8);
+    doc.text(`• Prazo de Entrega: ${deliveryDeadline}`, mg + 3, y + 12);
+    doc.text("• Garantia: 05 anos contra defeitos de fabricação em MDF e ferragens.", mg + 3, y + 16);
+    y += 28;
+
+    // Linhas de Assinatura
+    checkPageBreak(20);
+    const signW = 75;
+    doc.setDrawColor(160, 140, 120);
+    doc.line(mg + 10, y, mg + 10 + signW, y);
+    doc.line(PW - mg - signW - 10, y, PW - mg - 10, y);
+
     doc.setFontSize(7);
     doc.setTextColor(...gr);
-    doc.setFont("helvetica", "normal");
-    doc.text(
-      "Orçamento gerado por OrcaMóvel. Valores sujeitos a conferência técnica in loco.",
-      mg,
-      288
-    );
+    doc.text("CONTRATADA (Marcenaria)", mg + 10 + signW / 2, y + 4, { align: "center" });
+    doc.text("DE ACORDO - CLIENTE", PW - mg - 10 - signW / 2, y + 4, { align: "center" });
 
-    const fn = (clientName || "orcamento").replace(/\s+/g, "_").toLowerCase();
-    doc.save("orcamovel_" + fn + "_" + new Date().toLocaleDateString("pt-BR").replace(/\//g, "-") + ".pdf");
+    // Salvar arquivo
+    const fn = (clientName || "orcamento_marcenaria").replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
+    doc.save(`proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`);
   };
 
   const calcLine = (p) => {
@@ -672,11 +769,12 @@ export default function App() {
     return { lines, subtotal, marginVal, total: subtotal + marginVal };
   };
 
-  const addPiece = () =>
+  const addPiece = (ambDefault) =>
     setPieces((prev) => [
       ...prev,
       {
         _id: Date.now(),
+        ambiente: ambDefault || (ambientesDisponiveis[0] || "Sala de Estar"),
         nome: "Nova Peça",
         tipo: "m²",
         largura: 1.0,
@@ -717,6 +815,8 @@ export default function App() {
         id: Date.now(),
         date: new Date().toLocaleDateString("pt-BR"),
         client: clientName || "Cliente",
+        address: clientAddress,
+        phone: clientPhone,
         notes: ambientDesc,
         pieces: [...pieces],
         total: q.total,
@@ -761,7 +861,6 @@ export default function App() {
         @keyframes spin { to { transform: rotate(360deg); } }
         .spin { animation: spin 1s linear infinite; display: inline-block; }
         
-        /* Mobile Layout & Adaptations */
         .layout-grid {
           display: grid;
           grid-template-columns: 1fr 340px;
@@ -774,9 +873,9 @@ export default function App() {
           padding: 12px 18px;
           gap: 10px;
         }
-        .client-inputs {
+        .client-inputs-grid {
           display: grid;
-          grid-template-columns: 1fr 1fr;
+          grid-template-columns: 1fr 1fr 1fr;
           gap: 10px;
           margin-bottom: 14px;
         }
@@ -791,7 +890,7 @@ export default function App() {
           .header-wrap {
             padding: 10px 14px !important;
           }
-          .client-inputs {
+          .client-inputs-grid {
             grid-template-columns: 1fr !important;
           }
           .main-content {
@@ -878,7 +977,7 @@ export default function App() {
                     style={{ ...IS, fontFamily: "monospace", fontSize: 12, marginBottom: 8 }}
                   />
                   <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 12 }}>
-                    Crie sua chave gratuita em{" "}
+                    Crie sua chave em{" "}
                     <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" style={{ color: "#c8892a", textDecoration: "underline" }}>
                       openrouter.ai/keys
                     </a>
@@ -896,10 +995,10 @@ export default function App() {
                       }}
                       style={{ ...IS, fontSize: 13 }}
                     >
-                      <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet (Mais Inteligente & Preciso)</option>
-                      <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet (Rápido e Estável)</option>
+                      <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet (Padrão Recomendado)</option>
                       <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (Ultra Rápido)</option>
                       <option value="openai/gpt-4o">GPT-4o (OpenAI)</option>
+                      <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet</option>
                     </select>
                   </div>
 
@@ -1012,6 +1111,96 @@ export default function App() {
         </div>
       )}
 
+      {/* Modal de Detalhes do Cliente para o PDF Profissional */}
+      {showClientModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            style={{
+              background: "#1c1510",
+              border: "1px solid #c8892a",
+              borderRadius: 14,
+              padding: 22,
+              maxWidth: 440,
+              width: "100%",
+              boxShadow: "0 16px 48px rgba(0,0,0,.9)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontFamily: "'Playfair Display'", fontSize: 18, color: "#e8aa40", fontWeight: 700 }}>
+                📑 Dados da Proposta Comercial
+              </div>
+              <button onClick={() => setShowClientModal(false)} style={{ background: "none", border: "none", color: "#8a7050", fontSize: 18, cursor: "pointer" }}>✕</button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Nome do Cliente</label>
+                <input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Ex: Dr. Roberto Guimarães" style={IS} />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Endereço da Obra</label>
+                <input value={clientAddress} onChange={(e) => setClientAddress(e.target.value)} placeholder="Ex: Av. Paulista, 1000 — Apto 142" style={IS} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Telefone / WhatsApp</label>
+                  <input value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} placeholder="(11) 99999-9999" style={IS} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Arquiteto(a)</label>
+                  <input value={architectName} onChange={(e) => setArchitectName(e.target.value)} placeholder="Ex: Arq. Juliana Prado" style={IS} />
+                </div>
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Condições de Pagamento</label>
+                <input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} style={IS} />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Prazo de Entrega</label>
+                <input value={deliveryDeadline} onChange={(e) => setDeliveryDeadline(e.target.value)} style={IS} />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => {
+                  setShowClientModal(false);
+                  generatePDF();
+                }}
+                style={{
+                  flex: 1,
+                  background: "linear-gradient(135deg,#c8892a,#e8aa40)",
+                  border: "none",
+                  borderRadius: 8,
+                  color: "#0d0a07",
+                  padding: "12px",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                📄 Gerar PDF Agora
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Modal de Confirmação para PDF Grande */}
       {showConfirmAllModal && (
         <div
@@ -1045,7 +1234,7 @@ export default function App() {
               PDF com {uploadedFile?.pages?.length} Páginas
             </div>
             <div style={{ fontSize: 13, color: "#c0b090", lineHeight: 1.5, marginBottom: 16, textAlign: "center" }}>
-              Deseja analisar todas as <strong>{uploadedFile?.pages?.length} páginas</strong> sequencialmente, ou prefere analisar apenas a <strong>Página {selectedPageIndex + 1}</strong> atual?
+              Deseja analisar todas as <strong>{uploadedFile?.pages?.length} páginas</strong> separando por ambiente, ou prefere analisar apenas a <strong>Página {selectedPageIndex + 1}</strong> atual?
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <button
@@ -1062,7 +1251,7 @@ export default function App() {
                   textTransform: "uppercase",
                 }}
               >
-                Analisar Apenas Página {selectedPageIndex + 1} (Recomendado)
+                Analisar Apenas Página {selectedPageIndex + 1}
               </button>
               <button
                 onClick={() => executeAnalysis(false)}
@@ -1103,7 +1292,8 @@ export default function App() {
         {tab === "quote" && (
           <div className="layout-grid">
             <div>
-              <div className="client-inputs">
+              {/* Bloco de Identificação com Endereço e Dados do Cliente */}
+              <div className="client-inputs-grid">
                 <div>
                   <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4, fontWeight: 600 }}>
                     Cliente
@@ -1112,13 +1302,19 @@ export default function App() {
                 </div>
                 <div>
                   <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4, fontWeight: 600 }}>
-                    Ambiente
+                    Endereço da Obra
                   </label>
-                  <input value={ambientDesc} onChange={(e) => setAmbientDesc(e.target.value)} placeholder="Ex: Suíte Casal — Guarda-roupa" style={IS} />
+                  <input value={clientAddress} onChange={(e) => setClientAddress(e.target.value)} placeholder="Endereço / Cidade..." style={IS} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4, fontWeight: 600 }}>
+                    Ambientes Detectados
+                  </label>
+                  <input value={ambientDesc} onChange={(e) => setAmbientDesc(e.target.value)} placeholder="Ex: Sala, Cozinha, Suíte..." style={IS} />
                 </div>
               </div>
 
-              {/* Área de Upload / Preview Mobile Otimizada */}
+              {/* Área de Upload / Preview */}
               <div
                 className={`dropzone${isDragging ? " drag" : ""}`}
                 onDrop={(e) => {
@@ -1236,13 +1432,13 @@ export default function App() {
                     <label htmlFor={fileInputId} className="hb" style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 9, color: "#0d0a07", padding: "12px 28px", fontFamily: "'Barlow Condensed'", fontWeight: 700, fontSize: 15, letterSpacing: ".08em", cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 16px rgba(200,137,42,.3)", display: "inline-block", marginTop: 4 }}>
                       📁 Escolher Arquivo / Foto
                     </label>
-                    <div style={{ fontSize: 11, color: "#3e2a18" }}>JPG · PNG · PDF de prancha técnica</div>
+                    <div style={{ fontSize: 11, color: "#3e2a18" }}>JPG · PNG · PDF com múltiplos ambientes</div>
                   </>
                 )}
                 <input id={fileInputId} type="file" accept="image/*,.pdf" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
               </div>
 
-              {/* Botões de Ação da IA Mobile-First */}
+              {/* Botões de Ação da IA */}
               {uploadedFile && !uploadedFile.converting && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
                   <button
@@ -1299,7 +1495,7 @@ export default function App() {
                         textTransform: "uppercase",
                       }}
                     >
-                      📑 Analisar Projeto Inteiro ({uploadedFile.pages.length} páginas)
+                      📑 Analisar Projeto Inteiro ({uploadedFile.pages.length} páginas com separação de ambientes)
                     </button>
                   )}
 
@@ -1341,7 +1537,7 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span>⚠️ Atenção:</span>
+                    <span>⚠️ Informação:</span>
                   </div>
                   {analysisError}
                 </div>
@@ -1366,224 +1562,319 @@ export default function App() {
                 </div>
               )}
 
-              {/* Lista de Peças Identificadas */}
-              <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, overflow: "hidden", marginBottom: 14 }}>
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #1a1006", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                  <span style={{ fontFamily: "'Playfair Display'", fontSize: 17 }}>
-                    Peças Identificadas <span style={{ fontSize: 12, color: "#6a5038", fontFamily: "'Barlow'" }}>({pieces.length})</span>
+              {/* Seletor de Filtro de Ambiente */}
+              {ambientesDisponiveis.length > 1 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, overflowX: "auto", paddingBottom: 4 }}>
+                  <span style={{ fontSize: 11, color: "#8a6a40", textTransform: "uppercase", fontWeight: 700, whiteSpace: "nowrap" }}>
+                    Filtrar por:
                   </span>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {pieces.length > 0 && (
-                      <button
-                        onClick={() => setTab("corte")}
-                        style={{
-                          background: "linear-gradient(135deg,#c8892a,#e8aa40)",
-                          border: "none",
-                          borderRadius: 6,
-                          color: "#0d0a07",
-                          padding: "6px 12px",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          fontWeight: 700,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 4,
-                        }}
-                      >
-                        🪚 Ver Plano de Corte
-                      </button>
-                    )}
+                  <button
+                    onClick={() => setFilterAmbiente("todos")}
+                    style={{
+                      background: filterAmbiente === "todos" ? "#c8892a" : "#1a140e",
+                      color: filterAmbiente === "todos" ? "#000" : "#c0b090",
+                      border: `1px solid ${filterAmbiente === "todos" ? "#c8892a" : "#2e1e0e"}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Todos ({pieces.length})
+                  </button>
+                  {ambientesDisponiveis.map((amb) => (
                     <button
-                      onClick={addPiece}
+                      key={amb}
+                      onClick={() => setFilterAmbiente(amb)}
                       style={{
-                        background: "rgba(200,137,42,.12)",
-                        border: "1px solid rgba(200,137,42,.3)",
+                        background: filterAmbiente === amb ? "#c8892a" : "#1a140e",
+                        color: filterAmbiente === amb ? "#000" : "#c0b090",
+                        border: `1px solid ${filterAmbiente === amb ? "#c8892a" : "#2e1e0e"}`,
                         borderRadius: 6,
-                        color: "#c8892a",
-                        padding: "6px 12px",
+                        padding: "4px 10px",
                         fontSize: 12,
-                        cursor: "pointer",
                         fontWeight: 600,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      + Manual
+                      {amb} ({(pecasPorAmbiente[amb] || []).length})
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Lista de Peças Separadas por Ambiente */}
+              {pieces.length === 0 ? (
+                <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, padding: "36px 20px", textAlign: "center", color: "#4a3520", fontSize: 13, marginBottom: 14 }}>
+                  Envie o projeto e clique em Analisar com IA, ou adicione peças manualmente no botão abaixo.
+                  <div style={{ marginTop: 14 }}>
+                    <button
+                      onClick={() => addPiece()}
+                      style={{
+                        background: "rgba(200,137,42,.15)",
+                        border: "1px solid rgba(200,137,42,.3)",
+                        borderRadius: 8,
+                        color: "#c8892a",
+                        padding: "8px 18px",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      + Adicionar Peça Manual
                     </button>
                   </div>
                 </div>
+              ) : (
+                Object.keys(pecasPorAmbiente)
+                  .filter((amb) => filterAmbiente === "todos" || filterAmbiente === amb)
+                  .map((ambNome) => {
+                    const pecasAmbiente = pecasPorAmbiente[ambNome];
+                    const subtotalAmbiente = pecasAmbiente.reduce((acc, p) => acc + calcLine(p), 0);
 
-                {pieces.length === 0 ? (
-                  <div style={{ padding: "36px 20px", textAlign: "center", color: "#4a3520", fontSize: 13 }}>
-                    Envie o projeto e clique em Analisar com IA, ou adicione peças manualmente no botão acima.
-                  </div>
-                ) : (
-                  <>
-                    {/* Tabela para Computador (Desktop) */}
-                    <div className="desktop-table" style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
-                        <thead>
-                          <tr style={{ background: "#150f07" }}>
-                            {["Peça", "Tipo", "Larg (m)", "Alt (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
-                              <th
-                                key={h}
-                                style={{
-                                  padding: "8px 10px",
-                                  textAlign: "left",
-                                  fontSize: 9,
-                                  color: "#6a5038",
-                                  fontWeight: 700,
-                                  letterSpacing: ".1em",
-                                  textTransform: "uppercase",
-                                  borderBottom: "1px solid #1a1006",
-                                }}
-                              >
-                                {h}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {pieces.map((p) => (
-                            <tr key={p._id} className="hr" style={{ borderBottom: "1px solid #16100a" }}>
-                              <td style={{ padding: "6px 10px" }}>
-                                <div>
+                    return (
+                      <div
+                        key={ambNome}
+                        style={{
+                          background: "#110e09",
+                          border: "1px solid #24180c",
+                          borderRadius: 12,
+                          overflow: "hidden",
+                          marginBottom: 16,
+                        }}
+                      >
+                        {/* Header do Ambiente */}
+                        <div
+                          style={{
+                            padding: "10px 14px",
+                            background: "linear-gradient(90deg, #1e150c, #161009)",
+                            borderBottom: "1px solid #2a1c0e",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            gap: 8,
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 16 }}>📍</span>
+                            <input
+                              value={ambNome}
+                              onChange={(e) => {
+                                const novoNome = e.target.value;
+                                setPieces((prev) =>
+                                  prev.map((p) => (p.ambiente === ambNome ? { ...p, ambiente: novoNome } : p))
+                                );
+                              }}
+                              style={{
+                                background: "transparent",
+                                border: "none",
+                                color: "#e8aa40",
+                                fontFamily: "'Playfair Display'",
+                                fontSize: 16,
+                                fontWeight: 700,
+                                outline: "none",
+                                minWidth: 160,
+                              }}
+                            />
+                            <span style={{ fontSize: 11, color: "#7a6040" }}>({pecasAmbiente.length} peças)</span>
+                          </div>
+
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 16, fontWeight: 700, color: "#c8892a" }}>
+                              {fmtBRL(subtotalAmbiente)}
+                            </span>
+                            <button
+                              onClick={() => addPiece(ambNome)}
+                              style={{
+                                background: "rgba(200,137,42,.12)",
+                                border: "1px solid rgba(200,137,42,.3)",
+                                borderRadius: 6,
+                                color: "#c8892a",
+                                padding: "4px 8px",
+                                fontSize: 11,
+                                cursor: "pointer",
+                                fontWeight: 600,
+                              }}
+                            >
+                              + Item
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Tabela Desktop */}
+                        <div className="desktop-table" style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
+                            <thead>
+                              <tr style={{ background: "#150f07" }}>
+                                {["Peça", "Tipo", "Larg (m)", "Alt (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
+                                  <th
+                                    key={h}
+                                    style={{
+                                      padding: "7px 10px",
+                                      textAlign: "left",
+                                      fontSize: 9,
+                                      color: "#6a5038",
+                                      fontWeight: 700,
+                                      letterSpacing: ".1em",
+                                      textTransform: "uppercase",
+                                      borderBottom: "1px solid #1a1006",
+                                    }}
+                                  >
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {pecasAmbiente.map((p) => (
+                                <tr key={p._id} className="hr" style={{ borderBottom: "1px solid #16100a" }}>
+                                  <td style={{ padding: "6px 10px" }}>
+                                    <div>
+                                      <input
+                                        value={p.nome}
+                                        onChange={(e) => updPiece(p._id, "nome", e.target.value)}
+                                        style={{ background: "transparent", border: "none", color: "#e0d0b0", fontFamily: "'Barlow'", fontSize: 12, width: "100%", outline: "none", fontWeight: 500 }}
+                                      />
+                                      {p.aviso && <div style={{ fontSize: 10, color: "#c8892a", marginTop: 1 }}>⚠️ {p.aviso}</div>}
+                                      {p._pagina && <div style={{ fontSize: 9, color: "#5a4430", marginTop: 1 }}>pág. {p._pagina}</div>}
+                                    </div>
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 72 }}>
+                                      {["m²", "ml", "unidade", "%"].map((t) => (
+                                        <option key={t}>{t}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, width: 44, padding: "4px 5px", fontSize: 12, color: "#f0e0c8" }} />
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <input type="number" value={p.precoUnitario || ""} onChange={(e) => updPiece(p._id, "precoUnitario", e.target.value)} style={{ ...NS, width: 72, padding: "4px 5px", fontSize: 12 }} />
+                                  </td>
+                                  <td style={{ padding: "6px 10px", fontFamily: "'Barlow Condensed'", fontSize: 13, fontWeight: 700, color: "#c8892a", whiteSpace: "nowrap" }}>
+                                    {fmtBRL(calcLine(p))}
+                                  </td>
+                                  <td style={{ padding: "6px 6px" }}>
+                                    <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#6a3030", cursor: "pointer", fontSize: 14 }}>
+                                      ✕
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Lista Mobile em Cards */}
+                        <div className="mobile-card-list" style={{ padding: "10px" }}>
+                          {pecasAmbiente.map((p, idx) => (
+                            <div
+                              key={p._id}
+                              style={{
+                                background: "#16110a",
+                                border: "1px solid #2a1c0e",
+                                borderRadius: 10,
+                                padding: 12,
+                              }}
+                            >
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                                  <span style={{ background: "#c8892a", color: "#000", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, fontFamily: "monospace" }}>
+                                    P{String(idx + 1).padStart(2, "0")}
+                                  </span>
                                   <input
                                     value={p.nome}
                                     onChange={(e) => updPiece(p._id, "nome", e.target.value)}
-                                    style={{ background: "transparent", border: "none", color: "#e0d0b0", fontFamily: "'Barlow'", fontSize: 12, width: "100%", outline: "none", fontWeight: 500 }}
+                                    style={{ ...IS, padding: "5px 8px", fontSize: 13, fontWeight: 600 }}
                                   />
-                                  {p.aviso && <div style={{ fontSize: 10, color: "#c8892a", marginTop: 1 }}>⚠️ {p.aviso}</div>}
-                                  {p._pagina && <div style={{ fontSize: 9, color: "#5a4430", marginTop: 1 }}>pág. {p._pagina}</div>}
                                 </div>
-                              </td>
-                              <td style={{ padding: "6px 4px" }}>
-                                <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 72 }}>
-                                  {["m²", "ml", "unidade", "%"].map((t) => (
-                                    <option key={t}>{t}</option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td style={{ padding: "6px 4px" }}>
-                                <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
-                              </td>
-                              <td style={{ padding: "6px 4px" }}>
-                                <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
-                              </td>
-                              <td style={{ padding: "6px 4px" }}>
-                                <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, width: 44, padding: "4px 5px", fontSize: 12, color: "#f0e0c8" }} />
-                              </td>
-                              <td style={{ padding: "6px 4px" }}>
-                                <input type="number" value={p.precoUnitario || ""} onChange={(e) => updPiece(p._id, "precoUnitario", e.target.value)} style={{ ...NS, width: 72, padding: "4px 5px", fontSize: 12 }} />
-                              </td>
-                              <td style={{ padding: "6px 10px", fontFamily: "'Barlow Condensed'", fontSize: 13, fontWeight: 700, color: "#c8892a", whiteSpace: "nowrap" }}>
-                                {fmtBRL(calcLine(p))}
-                              </td>
-                              <td style={{ padding: "6px 6px" }}>
-                                <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#6a3030", cursor: "pointer", fontSize: 14 }}>
+                                <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#8a4040", cursor: "pointer", fontSize: 16, paddingLeft: 8 }}>
                                   ✕
                                 </button>
-                              </td>
-                            </tr>
+                              </div>
+
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+                                <div>
+                                  <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Larg (m)</span>
+                                  <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                                </div>
+                                <div>
+                                  <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Alt (m)</span>
+                                  <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                                </div>
+                                <div>
+                                  <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Qtd</span>
+                                  <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                                </div>
+                              </div>
+
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #22160a", paddingTop: 8 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, width: 68, padding: "4px 6px", fontSize: 11 }}>
+                                    {["m²", "ml", "unidade", "%"].map((t) => (
+                                      <option key={t}>{t}</option>
+                                    ))}
+                                  </select>
+                                  <span style={{ fontSize: 11, color: "#7a6040" }}>{fmtBRL(p.precoUnitario || 0)}</span>
+                                </div>
+                                <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 16, fontWeight: 700, color: "#e8aa40" }}>
+                                  {fmtBRL(calcLine(p))}
+                                </div>
+                              </div>
+                            </div>
                           ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Lista em Cards para Celular (Mobile) */}
-                    <div className="mobile-card-list" style={{ padding: "10px" }}>
-                      {pieces.map((p, idx) => (
-                        <div
-                          key={p._id}
-                          style={{
-                            background: "#16110a",
-                            border: "1px solid #2a1c0e",
-                            borderRadius: 10,
-                            padding: 12,
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
-                              <span style={{ background: "#c8892a", color: "#000", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, fontFamily: "monospace" }}>
-                                P{String(idx + 1).padStart(2, "0")}
-                              </span>
-                              <input
-                                value={p.nome}
-                                onChange={(e) => updPiece(p._id, "nome", e.target.value)}
-                                style={{ ...IS, padding: "5px 8px", fontSize: 13, fontWeight: 600 }}
-                              />
-                            </div>
-                            <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#8a4040", cursor: "pointer", fontSize: 16, paddingLeft: 8 }}>
-                              ✕
-                            </button>
-                          </div>
-
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
-                            <div>
-                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Larg (m)</span>
-                              <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
-                            </div>
-                            <div>
-                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Alt (m)</span>
-                              <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
-                            </div>
-                            <div>
-                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Qtd</span>
-                              <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
-                            </div>
-                          </div>
-
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #22160a", paddingTop: 8 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, width: 68, padding: "4px 6px", fontSize: 11 }}>
-                                {["m²", "ml", "unidade", "%"].map((t) => (
-                                  <option key={t}>{t}</option>
-                                ))}
-                              </select>
-                              <span style={{ fontSize: 11, color: "#7a6040" }}>{fmtBRL(p.precoUnitario || 0)}</span>
-                            </div>
-                            <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 16, fontWeight: 700, color: "#e8aa40" }}>
-                              {fmtBRL(calcLine(p))}
-                            </div>
-                          </div>
                         </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
+                      </div>
+                    );
+                  })
+              )}
             </div>
 
-            {/* Coluna Direita / Abaixo no Mobile: Card de Resumo */}
+            {/* Coluna Direita: Resumo com Totais por Ambiente */}
             <div>
               <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 14, padding: "18px" }}>
-                <div style={{ fontFamily: "'Playfair Display'", fontSize: 20, marginBottom: 14 }}>Resumo</div>
+                <div style={{ fontFamily: "'Playfair Display'", fontSize: 20, marginBottom: 12 }}>Resumo por Ambiente</div>
                 {quote.lines.length === 0 ? (
                   <div style={{ color: "#4a3520", fontSize: 13, textAlign: "center", padding: "20px 0" }}>
                     Adicione ou extraia peças para visualizar o cálculo total
                   </div>
                 ) : (
                   <>
-                    <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 14, paddingRight: 4 }}>
-                      {quote.lines.map((l) => (
-                        <div key={l._id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #16100a", gap: 8 }}>
-                          <div>
-                            <div style={{ fontSize: 12, color: "#d0c0a0", fontWeight: 500 }}>
-                              {l.quantidade}× {l.nome}
+                    {/* Lista de Ambientes com Subtotais */}
+                    <div style={{ marginBottom: 14, borderBottom: "1px solid #22160a", paddingBottom: 10 }}>
+                      {Object.keys(pecasPorAmbiente).map((ambNome) => {
+                        const pecasAmb = pecasPorAmbiente[ambNome];
+                        const subAmb = pecasAmb.reduce((acc, p) => acc + calcLine(p), 0);
+                        const pct = quote.subtotal > 0 ? Math.round((subAmb / quote.subtotal) * 100) : 0;
+                        return (
+                          <div key={ambNome} style={{ padding: "6px 0", borderBottom: "1px solid #161009" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <span style={{ fontSize: 12, color: "#d0c0a0", fontWeight: 600 }}>📍 {ambNome}</span>
+                              <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 14, color: "#e8aa40", fontWeight: 700 }}>
+                                {fmtBRL(subAmb)}
+                              </span>
                             </div>
-                            <div style={{ fontSize: 10, color: "#6a5038", marginTop: 1 }}>
-                              {l.tipo === "m²"
-                                ? `${(parseFloat(l.largura) || 0).toFixed(2)}×${(parseFloat(l.altura) || 0).toFixed(2)}m²`
-                                : l.tipo}{" "}
-                              · {fmtBRL(l.precoUnitario || 0)}
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#6a5038", marginTop: 2 }}>
+                              <span>{pecasAmb.length} itens</span>
+                              <span>{pct}% do projeto</span>
                             </div>
                           </div>
-                          <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 13, fontWeight: 700, color: "#c8892a", whiteSpace: "nowrap" }}>
-                            {fmtBRL(l.lineTotal)}
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
 
-                    <div style={{ borderTop: "1px solid #2a1c0a", paddingTop: 10 }}>
+                    <div>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                         <span style={{ fontSize: 12, color: "#7a6040" }}>Subtotal materiais</span>
                         <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 14, color: "#c0b090", fontWeight: 600 }}>{fmtBRL(quote.subtotal)}</span>
@@ -1638,6 +1929,29 @@ export default function App() {
 
                     <button
                       className="hb"
+                      onClick={() => setShowClientModal(true)}
+                      style={{
+                        width: "100%",
+                        marginTop: 8,
+                        padding: "11px",
+                        background: "linear-gradient(135deg,#1a2a4a,#2a4a8a)",
+                        border: "none",
+                        borderRadius: 9,
+                        color: "#80b0f0",
+                        fontFamily: "'Barlow Condensed'",
+                        fontWeight: 700,
+                        fontSize: 14,
+                        letterSpacing: ".08em",
+                        cursor: "pointer",
+                        textTransform: "uppercase",
+                        transition: "all .2s",
+                      }}
+                    >
+                      📄 Gerar PDF Profissional
+                    </button>
+
+                    <button
+                      className="hb"
                       onClick={saveQuote}
                       style={{
                         width: "100%",
@@ -1653,37 +1967,21 @@ export default function App() {
                         letterSpacing: ".08em",
                         cursor: "pointer",
                         textTransform: "uppercase",
+                        transition: "all .2s",
                       }}
                     >
                       💾 Salvar Orçamento
                     </button>
-                    <button
-                      className="hb"
-                      onClick={generatePDF}
-                      style={{
-                        width: "100%",
-                        marginTop: 8,
-                        padding: "11px",
-                        background: "linear-gradient(135deg,#1a2a4a,#2a4a8a)",
-                        border: "none",
-                        borderRadius: 9,
-                        color: "#80b0f0",
-                        fontFamily: "'Barlow Condensed'",
-                        fontWeight: 700,
-                        fontSize: 14,
-                        letterSpacing: ".08em",
-                        cursor: "pointer",
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      📄 Gerar PDF Comercial
-                    </button>
+
                     <button
                       className="hb"
                       onClick={() => {
                         setPieces([]);
                         setUploadedFile(null);
                         setClientName("");
+                        setClientAddress("");
+                        setClientPhone("");
+                        setArchitectName("");
                         setAmbientDesc("");
                         setAnalysisError(null);
                         setFormasCompostas([]);
@@ -1872,6 +2170,7 @@ export default function App() {
                       <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, fontWeight: 700 }}>{q.client}</div>
                       <div style={{ fontSize: 11, color: "#6a5540" }}>{q.date}</div>
                     </div>
+                    {q.address && <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 4 }}>📍 {q.address}</div>}
                     {q.notes && <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 8 }}>{q.notes}</div>}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ fontSize: 11, color: "#5a4430" }}>{q.pieces?.length || 0} peças</span>
@@ -1881,7 +2180,9 @@ export default function App() {
                       <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #1a1006" }}>
                         {q.pieces.map((p, i) => (
                           <div key={i} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                            <span style={{ fontSize: 11, color: "#9a8a70" }}>{p.quantidade}× {p.nome}</span>
+                            <span style={{ fontSize: 11, color: "#9a8a70" }}>
+                              {p.ambiente ? `[${p.ambiente}] ` : ""}{p.quantidade}× {p.nome}
+                            </span>
                             <span style={{ fontSize: 11, color: "#c8892a", fontFamily: "'Barlow Condensed'", fontWeight: 600 }}>{fmtBRL(calcLine(p))}</span>
                           </div>
                         ))}
