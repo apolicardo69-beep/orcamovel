@@ -131,13 +131,14 @@ export default function App() {
   const [savedBanner, setSavedBanner] = useState(false);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("om_apikey") || "");
   const [showKeyInput, setShowKeyInput] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("om_model") || "anthropic/claude-3.7-sonnet");
   const [editingRule, setEditingRule] = useState(null);
   const [showAddRule, setShowAddRule] = useState(false);
   const [newRule, setNewRule] = useState({ category: "Armário/Guarda-roupa", label: "", unit: "m²", price: "", note: "" });
   const [showAddExample, setShowAddExample] = useState(false);
   const [newExample, setNewExample] = useState({ label: "", ambiente: "", dimensoes: "", descricao: "", calculo: "", total: "" });
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("om_model") || "anthropic/claude-3.7-sonnet");
-  const [analyzingProgress, setAnalyzingProgress] = useState(null); // { current, total, pageInfo }
+  const [analyzingProgress, setAnalyzingProgress] = useState(null);
+  const [showConfirmAllModal, setShowConfirmAllModal] = useState(false);
   
   const abortControllerRef = useRef(null);
   const fileInputId = "projeto-upload-input";
@@ -146,7 +147,7 @@ export default function App() {
   const saveExamples = (e) => { setExamples(e); lsSet("om_examples_v1", e); };
   const saveHistory = (h) => { setHistory(h); lsSet("om_history_v2", h); };
 
-  // Otimização de Imagem em Canvas
+  // Otimização de Imagem em Canvas (mantém cotas e medidas nítidas em arquivo ultra leve)
   const resizeImageToDataUrl = (img, maxDimension = 1600, quality = 0.82) => {
     let { width, height } = img;
     if (width > maxDimension || height > maxDimension) {
@@ -168,7 +169,7 @@ export default function App() {
     return canvas.toDataURL("image/jpeg", quality);
   };
 
-  // Conversão de PDF otimizada para Web e Mobile
+  // Conversão de PDF Otimizada para Celular e Computador
   const pdfToImages = async (arrayBuffer) => {
     if (!window.pdfjsLib) {
       await new Promise((res, rej) => {
@@ -275,12 +276,12 @@ export default function App() {
             return { pecas, ambiente: "Ambiente do Projeto", descricao: "" };
           } catch {}
         }
-        throw new Error("A imagem não pôde ser interpretada como JSON. Tente com uma imagem mais nítida ou adicione as peças manualmente.");
+        throw new Error("Não foi possível extrair dados estruturados desta imagem.");
       }
     }
   };
 
-  // Chamada de IA para uma página/imagem
+  // Chamada de IA
   const requestPageAnalysis = async (systemPrompt, imageDataUrl, instruction, pageLabel, signal) => {
     let maxTokens = 4096;
     const MAX_ATTEMPTS = 3;
@@ -348,9 +349,10 @@ export default function App() {
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        if (err?.error?.code === "NO_SERVER_KEY") {
+        if (err?.error?.code === "NO_SERVER_KEY" || !apiKey) {
+          setShowKeyInput(true);
           throw new Error(
-            "Nenhuma chave configurada. Clique em '⚙️ API key' no topo para inserir sua chave OpenRouter, ou configure OPENROUTER_API_KEY na Vercel."
+            "Chave da OpenRouter necessária: Cole sua chave no menu de configurações que abriu na tela."
           );
         }
         throw new Error(err?.error?.message || `Erro HTTP ${resp.status} em ${pageLabel}`);
@@ -385,7 +387,8 @@ export default function App() {
     }
   };
 
-  const analyzeProject = async (onlyCurrentPage = false) => {
+  const executeAnalysis = async (onlyCurrentPage) => {
+    setShowConfirmAllModal(false);
     if (!uploadedFile) return;
     if (uploadedFile.converting) {
       setAnalysisError("Aguarde a conversão do PDF terminar...");
@@ -405,16 +408,9 @@ export default function App() {
       return;
     }
 
-    if (!onlyCurrentPage && total > LARGE_PDF_PAGE_THRESHOLD) {
-      const ok = window.confirm(
-        `Este documento possui ${total} páginas. A análise processará página por página de forma sequencial.\n\nDeseja analisar todas as ${total} páginas? (Você também pode analisar apenas a página selecionada).`
-      );
-      if (!ok) return;
-    }
-
     setIsAnalyzing(true);
     setAnalysisError(null);
-    setAnalyzingProgress({ current: 1, total });
+    setAnalyzingProgress({ current: 1, total, pageNum: imagesToAnalyze[0].pageNum });
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
@@ -434,7 +430,7 @@ export default function App() {
       const pageLabel = total > 1 ? `página ${pageNum}/${allImages.length}` : "o projeto";
       const instruction =
         total > 1
-          ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Analise os móveis, cotas e medidas visíveis NESTA página. Retorne SOMENTE o JSON. Se não houver móveis cotados nesta página (ex: capa ou texto geral), retorne "pecas": [].`
+          ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Extraia móveis, cotas e medidas desta página. Retorne SOMENTE o JSON. Se esta for uma capa ou texto descritivo sem móveis cotados, retorne "pecas": [].`
           : `Analise este projeto técnico de móveis planejados e retorne SOMENTE o JSON com todas as peças, cotas e preços calculados conforme as regras.`;
 
       try {
@@ -475,14 +471,23 @@ export default function App() {
 
     if (failedPages.length > 0) {
       setAnalysisError(
-        `${newPieces.length} peça(s) extraída(s). ${failedPages.length} página(s) não puderam ser lidas (${failedPages[0].error}). Você pode adicionar peças manualmente se necessário.`
+        `${newPieces.length} peça(s) extraída(s). Houve falha na leitura de ${failedPages.length} página(s) (${failedPages[0].error}).`
       );
     } else if (newPieces.length === 0) {
-      setAnalysisError("Nenhuma peça com medidas foi identificada nas páginas analisadas. Você pode adicionar peças pelo botão '+ Manual'.");
+      setAnalysisError("Nenhuma peça com cotas foi identificada nesta página (se for capa ou memorial, mude para a página com o desenho do móvel e tente novamente).");
     }
 
     setIsAnalyzing(false);
     abortControllerRef.current = null;
+  };
+
+  const handleStartAnalysis = (onlyCurrentPage) => {
+    const total = uploadedFile?.isPdf ? (uploadedFile.pages?.length || 1) : 1;
+    if (!onlyCurrentPage && total > LARGE_PDF_PAGE_THRESHOLD) {
+      setShowConfirmAllModal(true);
+      return;
+    }
+    executeAnalysis(onlyCurrentPage);
   };
 
   const generatePDF = async () => {
@@ -732,36 +737,33 @@ export default function App() {
     border: "1px solid #332618",
     borderRadius: 8,
     color: "#f0e0c8",
-    padding: "9px 12px",
+    padding: "10px 12px",
     fontFamily: "'Barlow', sans-serif",
-    fontSize: 13,
+    fontSize: 14,
     outline: "none",
     width: "100%",
   };
   const NS = { ...IS, color: "#d4952e", fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700 };
 
   return (
-    <div style={{ fontFamily: "'Barlow', sans-serif", background: "#0d0a07", minHeight: "100vh", color: "#f0e0c8", overflowX: "hidden" }}>
+    <div style={{ fontFamily: "'Barlow', sans-serif", background: "#0d0a07", minHeight: "100vh", color: "#f0e0c8", overflowX: "hidden", paddingBottom: 60 }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Barlow:wght@300;400;500;600&family=Barlow+Condensed:wght@400;600;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
         ::-webkit-scrollbar-track { background: #110e09; }
-        ::-webkit-scrollbar-thumb { background: #3a2a1a; border-radius: 3px; }
-        input, select, textarea { font-family: 'Barlow', sans-serif !important; }
-        input:focus, select:focus { border-color: #c8892a !important; box-shadow: 0 0 0 2px rgba(200,137,42,.15) !important; }
-        .hb:hover { opacity: .88; transform: translateY(-1px); }
-        .hb:active { transform: translateY(0); }
-        .hr:hover { background: rgba(255,255,255,.02) !important; }
+        ::-webkit-scrollbar-thumb { background: #3a2a1a; border-radius: 2px; }
+        input, select, textarea { font-family: 'Barlow', sans-serif !important; touch-action: manipulation; }
+        input:focus, select:focus { border-color: #c8892a !important; box-shadow: 0 0 0 2px rgba(200,137,42,.2) !important; }
+        .hb:active { transform: scale(0.97); }
         .tab:hover { color: #c8892a !important; }
         .dropzone.drag { border-color: #c8892a !important; background: rgba(200,137,42,.06) !important; }
-        .hcard:hover { border-color: #5a4030 !important; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
         .ban { animation: fadeIn .3s ease; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .spin { animation: spin 1s linear infinite; display: inline-block; }
         
-        /* Regras de Responsividade Mobile */
+        /* Mobile Layout & Adaptations */
         .layout-grid {
           display: grid;
           grid-template-columns: 1fr 340px;
@@ -771,111 +773,121 @@ export default function App() {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 14px 24px;
-          gap: 12px;
-          flex-wrap: wrap;
+          padding: 12px 18px;
+          gap: 10px;
         }
         .client-inputs {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 10px;
-          margin-bottom: 16px;
+          margin-bottom: 14px;
         }
+        .desktop-table { display: block; }
+        .mobile-card-list { display: none; }
+
         @media (max-width: 860px) {
           .layout-grid {
             grid-template-columns: 1fr !important;
+            gap: 14px !important;
           }
           .header-wrap {
-            padding: 12px 16px !important;
+            padding: 10px 14px !important;
           }
           .client-inputs {
             grid-template-columns: 1fr !important;
           }
           .main-content {
-            padding: 16px 12px !important;
+            padding: 12px 10px !important;
           }
-          .rule-add-grid {
-            grid-template-columns: 1fr !important;
-          }
+          .desktop-table { display: none !important; }
+          .mobile-card-list { display: flex !important; flex-direction: column; gap: 10px; }
         }
       `}</style>
 
       {/* Top Header */}
-      <header style={{ background: "linear-gradient(135deg,#18110a,#221609)", borderBottom: "1px solid #2e1f0e" }}>
+      <header style={{ background: "linear-gradient(135deg,#18110a,#221609)", borderBottom: "1px solid #2e1f0e", position: "sticky", top: 0, zIndex: 90 }}>
         <div className="header-wrap">
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 42, height: 42, background: "linear-gradient(135deg,#c8892a,#e8aa40)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, boxShadow: "0 4px 12px rgba(200,137,42,.3)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 38, height: 38, background: "linear-gradient(135deg,#c8892a,#e8aa40)", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: "0 4px 12px rgba(200,137,42,.3)" }}>
               🪵
             </div>
             <div>
-              <div style={{ fontFamily: "'Playfair Display'", fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em" }}>
-                OrcaMóvel <span style={{ fontSize: 13, color: "#e8aa40", fontFamily: "'Barlow Condensed'", fontWeight: 600, background: "rgba(200,137,42,.15)", padding: "2px 6px", borderRadius: 4, marginLeft: 4 }}>+ CorteSmart</span>
+              <div style={{ fontFamily: "'Playfair Display'", fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>
+                OrcaMóvel
               </div>
-              <div style={{ fontSize: 10, color: "#8a6a40", letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 600 }}>
-                Orçamento com IA & Plano de Corte 2D
+              <div style={{ fontSize: 9, color: "#8a6a40", letterSpacing: ".1em", textTransform: "uppercase", fontWeight: 600 }}>
+                IA & Corte 2D
               </div>
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ position: "relative" }}>
               <button
                 onClick={() => setShowKeyInput((v) => !v)}
                 style={{
-                  background: apiKey ? "rgba(100,200,80,.12)" : "rgba(200,137,42,.1)",
-                  border: `1px solid ${apiKey ? "rgba(100,200,80,.3)" : "rgba(200,137,42,.25)"}`,
+                  background: apiKey ? "rgba(100,200,80,.15)" : "rgba(200,137,42,.12)",
+                  border: `1px solid ${apiKey ? "rgba(100,200,80,.35)" : "rgba(200,137,42,.3)"}`,
                   borderRadius: 8,
                   color: apiKey ? "#80c860" : "#c8892a",
-                  padding: "8px 14px",
+                  padding: "7px 12px",
                   fontSize: 12,
                   cursor: "pointer",
                   fontWeight: 600,
                   display: "flex",
                   alignItems: "center",
-                  gap: 6,
+                  gap: 5,
                 }}
               >
-                ⚙️ {apiKey ? "Chave Pessoal ✓" : "API key"}
+                ⚙️ {apiKey ? "IA Ativa ✓" : "Configurar IA"}
               </button>
 
               {showKeyInput && (
                 <div
                   style={{
-                    position: "absolute",
-                    right: 0,
-                    top: "115%",
+                    position: "fixed",
+                    top: "50%",
+                    left: "50%",
+                    transform: "translate(-50%, -50%)",
                     background: "#1c1510",
-                    border: "1px solid #3a2618",
-                    borderRadius: 12,
-                    padding: 16,
-                    zIndex: 100,
-                    minWidth: 290,
-                    maxWidth: "90vw",
-                    boxShadow: "0 10px 36px rgba(0,0,0,.7)",
+                    border: "1px solid #c8892a",
+                    borderRadius: 14,
+                    padding: 20,
+                    zIndex: 999,
+                    width: "92%",
+                    maxWidth: 380,
+                    boxShadow: "0 16px 48px rgba(0,0,0,.85)",
                   }}
                 >
-                  <div style={{ fontSize: 12, color: "#a08050", fontWeight: 600, marginBottom: 6 }}>
-                    Chave OpenRouter pessoal (sk-or-...):
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <div style={{ fontFamily: "'Playfair Display'", fontSize: 17, color: "#e8aa40", fontWeight: 700 }}>
+                      ⚙️ Configuração da IA
+                    </div>
+                    <button onClick={() => setShowKeyInput(false)} style={{ background: "none", border: "none", color: "#8a7050", fontSize: 18, cursor: "pointer" }}>✕</button>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "#c0b090", marginBottom: 6, fontWeight: 500 }}>
+                    Chave OpenRouter (sk-or-...):
                   </div>
                   <input
                     type="password"
                     value={apiKey}
-                    placeholder="sk-or-..."
+                    placeholder="sk-or-v1-..."
                     onChange={(e) => {
                       setApiKey(e.target.value);
                       localStorage.setItem("om_apikey", e.target.value);
                     }}
                     style={{ ...IS, fontFamily: "monospace", fontSize: 12, marginBottom: 8 }}
                   />
-                  <div style={{ fontSize: 11, color: "#6a5038", marginBottom: 8, lineHeight: 1.4 }}>
-                    Obtenha sua chave em{" "}
+                  <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 12 }}>
+                    Crie sua chave gratuita em{" "}
                     <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" style={{ color: "#c8892a", textDecoration: "underline" }}>
                       openrouter.ai/keys
                     </a>
                   </div>
 
-                  <div style={{ borderTop: "1px solid #2a1c0e", paddingTop: 10, marginBottom: 8 }}>
-                    <div style={{ fontSize: 12, color: "#a08050", fontWeight: 600, marginBottom: 5 }}>
+                  <div style={{ borderTop: "1px solid #2a1c0e", paddingTop: 10, marginBottom: 12 }}>
+                    <div style={{ fontSize: 12, color: "#c0b090", marginBottom: 6, fontWeight: 500 }}>
                       Modelo de IA para Leitura:
                     </div>
                     <select
@@ -884,43 +896,39 @@ export default function App() {
                         setSelectedModel(e.target.value);
                         localStorage.setItem("om_model", e.target.value);
                       }}
-                      style={{ ...IS, fontSize: 12 }}
+                      style={{ ...IS, fontSize: 13 }}
                     >
-                      <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet (Mais Recente & Preciso)</option>
+                      <option value="anthropic/claude-3.7-sonnet">Claude 3.7 Sonnet (Mais Inteligente & Preciso)</option>
                       <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet (Rápido e Estável)</option>
                       <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash (Ultra Rápido)</option>
                       <option value="openai/gpt-4o">GPT-4o (OpenAI)</option>
                     </select>
                   </div>
 
-                  <div style={{ fontSize: 11, color: "#5a4430", lineHeight: 1.4, borderTop: "1px solid #2a1c0e", paddingTop: 8 }}>
-                    💡 Se deixar a chave em branco, o app usará a chave configurada no servidor na Vercel (<code>OPENROUTER_API_KEY</code>).
-                  </div>
                   <button
                     onClick={() => setShowKeyInput(false)}
                     style={{
-                      marginTop: 12,
                       width: "100%",
                       background: "linear-gradient(135deg,#c8892a,#e8aa40)",
                       border: "none",
-                      borderRadius: 7,
+                      borderRadius: 8,
                       color: "#0d0a07",
-                      padding: "8px 14px",
+                      padding: "11px 14px",
                       cursor: "pointer",
-                      fontSize: 12,
+                      fontSize: 13,
                       fontWeight: 700,
                       textTransform: "uppercase",
                     }}
                   >
-                    Salvar e Fechar
+                    Salvar Configurações
                   </button>
                 </div>
               )}
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#150f09", padding: "4px 10px", borderRadius: 8, border: "1px solid #2e1f0e" }}>
-              <span style={{ fontSize: 11, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 600 }}>
-                Margem
+            <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#150f09", padding: "4px 8px", borderRadius: 8, border: "1px solid #2e1f0e" }}>
+              <span style={{ fontSize: 10, color: "#8a6a40", textTransform: "uppercase", fontWeight: 700 }}>
+                %
               </span>
               <input
                 type="number"
@@ -932,30 +940,29 @@ export default function App() {
                 min={0}
                 max={200}
                 style={{
-                  width: 52,
+                  width: 44,
                   background: "#1c1510",
                   border: "1px solid #3a2a1a",
                   borderRadius: 6,
                   color: "#d4952e",
-                  padding: "4px 6px",
-                  fontSize: 14,
+                  padding: "3px 4px",
+                  fontSize: 13,
                   fontFamily: "'Barlow Condensed'",
                   fontWeight: 700,
                   textAlign: "center",
                 }}
               />
-              <span style={{ fontSize: 13, color: "#7a5a30", fontWeight: 700 }}>%</span>
             </div>
           </div>
         </div>
       </header>
 
-      {/* Tabs Navigation (com a nova aba Plano de Corte) */}
-      <nav style={{ background: "#110e09", borderBottom: "1px solid #1a1006", padding: "0 16px", display: "flex", overflowX: "auto" }}>
+      {/* Tabs Navigation */}
+      <nav style={{ background: "#110e09", borderBottom: "1px solid #1a1006", padding: "0 10px", display: "flex", overflowX: "auto" }}>
         {[
           { id: "quote", icon: "📐", label: "Orçamento" },
           { id: "corte", icon: "🪚", label: `Plano de Corte${pieces.length > 0 ? ` (${pieces.length})` : ""}` },
-          { id: "training", icon: "🧠", label: "Treinamento" },
+          { id: "training", icon: "🧠", label: "Treinar IA" },
           { id: "history", icon: "📋", label: "Histórico" },
         ].map((t) => (
           <button
@@ -966,7 +973,7 @@ export default function App() {
               border: "none",
               background: "transparent",
               cursor: "pointer",
-              padding: "13px 18px",
+              padding: "12px 14px",
               fontFamily: "'Barlow'",
               fontWeight: tab === t.id ? 600 : 500,
               fontSize: 13,
@@ -974,6 +981,8 @@ export default function App() {
               borderBottom: tab === t.id ? "2px solid #c8892a" : "2px solid transparent",
               transition: "all .2s",
               whiteSpace: "nowrap",
+              flex: "1 0 auto",
+              textAlign: "center",
             }}
           >
             {t.icon} {t.label}
@@ -1001,32 +1010,117 @@ export default function App() {
             boxShadow: "0 8px 24px rgba(0,0,0,.6)",
           }}
         >
-          ✅ Orçamento salvo no Histórico!
+          ✅ Orçamento salvo com sucesso!
+        </div>
+      )}
+
+      {/* Modal de Confirmação para PDF Grande */}
+      {showConfirmAllModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            style={{
+              background: "#1c1510",
+              border: "1px solid #c8892a",
+              borderRadius: 14,
+              padding: 22,
+              maxWidth: 380,
+              width: "100%",
+              boxShadow: "0 16px 40px rgba(0,0,0,.9)",
+            }}
+          >
+            <div style={{ fontSize: 32, marginBottom: 8, textAlign: "center" }}>📑</div>
+            <div style={{ fontFamily: "'Playfair Display'", fontSize: 18, color: "#e8aa40", textAlign: "center", marginBottom: 8 }}>
+              PDF com {uploadedFile?.pages?.length} Páginas
+            </div>
+            <div style={{ fontSize: 13, color: "#c0b090", lineHeight: 1.5, marginBottom: 16, textAlign: "center" }}>
+              Deseja analisar todas as <strong>{uploadedFile?.pages?.length} páginas</strong> sequencialmente, ou prefere analisar apenas a <strong>Página {selectedPageIndex + 1}</strong> atual?
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button
+                onClick={() => executeAnalysis(true)}
+                style={{
+                  background: "linear-gradient(135deg,#c8892a,#e8aa40)",
+                  border: "none",
+                  borderRadius: 8,
+                  color: "#0d0a07",
+                  padding: "12px",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                Analisar Apenas Página {selectedPageIndex + 1} (Recomendado)
+              </button>
+              <button
+                onClick={() => executeAnalysis(false)}
+                style={{
+                  background: "rgba(200,137,42,.15)",
+                  border: "1px solid rgba(200,137,42,.3)",
+                  borderRadius: 8,
+                  color: "#c8892a",
+                  padding: "11px",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Analisar Todas as {uploadedFile?.pages?.length} Páginas
+              </button>
+              <button
+                onClick={() => setShowConfirmAllModal(false)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#8a7050",
+                  padding: "8px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
       {/* Main Container */}
-      <main className="main-content" style={{ maxWidth: 1160, margin: "0 auto", padding: "20px 20px" }}>
+      <main className="main-content" style={{ maxWidth: 1160, margin: "0 auto", padding: "16px 14px" }}>
         {/* Aba 1: Orçamento Comercial */}
         {tab === "quote" && (
           <div className="layout-grid">
             <div>
               <div className="client-inputs">
                 <div>
-                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 5, fontWeight: 600 }}>
+                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4, fontWeight: 600 }}>
                     Cliente
                   </label>
                   <input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Nome do cliente..." style={IS} />
                 </div>
                 <div>
-                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 5, fontWeight: 600 }}>
+                  <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4, fontWeight: 600 }}>
                     Ambiente
                   </label>
                   <input value={ambientDesc} onChange={(e) => setAmbientDesc(e.target.value)} placeholder="Ex: Suíte Casal — Guarda-roupa" style={IS} />
                 </div>
               </div>
 
-              {/* Área de Upload / Preview */}
+              {/* Área de Upload / Preview Mobile Otimizada */}
               <div
                 className={`dropzone${isDragging ? " drag" : ""}`}
                 onDrop={(e) => {
@@ -1042,7 +1136,7 @@ export default function App() {
                 style={{
                   border: "2px dashed #3a2810",
                   borderRadius: 14,
-                  padding: "18px",
+                  padding: "16px",
                   textAlign: "center",
                   marginBottom: 14,
                   background: "#0f0c08",
@@ -1068,7 +1162,7 @@ export default function App() {
                         src={uploadedFile.isPdf && uploadedFile.pages?.length ? uploadedFile.pages[selectedPageIndex] : uploadedFile.preview}
                         alt="Projeto"
                         style={{
-                          maxHeight: 220,
+                          maxHeight: 240,
                           maxWidth: "100%",
                           borderRadius: 10,
                           objectFit: "contain",
@@ -1078,46 +1172,71 @@ export default function App() {
                       />
                     </div>
 
+                    {/* Navegador de Páginas Mobile com Toque Fácil */}
                     {uploadedFile.isPdf && uploadedFile.pages?.length > 1 && (
-                      <div style={{ width: "100%", marginTop: 4 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontSize: 12, color: "#c8892a" }}>
+                      <div style={{ width: "100%", background: "#150f09", padding: "8px 12px", borderRadius: 10, border: "1px solid #2a1c0e" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                           <button
+                            className="hb"
                             onClick={() => setSelectedPageIndex((i) => Math.max(0, i - 1))}
                             disabled={selectedPageIndex === 0}
-                            style={{ background: "#1c1510", border: "1px solid #332618", color: "#c8892a", borderRadius: 5, padding: "3px 8px", cursor: selectedPageIndex === 0 ? "not-allowed" : "pointer" }}
+                            style={{
+                              background: selectedPageIndex === 0 ? "#14100b" : "linear-gradient(135deg,#c8892a,#e8aa40)",
+                              border: "none",
+                              color: selectedPageIndex === 0 ? "#4a3520" : "#0d0a07",
+                              borderRadius: 7,
+                              padding: "7px 14px",
+                              cursor: selectedPageIndex === 0 ? "not-allowed" : "pointer",
+                              fontWeight: 700,
+                              fontSize: 13,
+                            }}
                           >
-                            ◀
+                            ◀ Anterior
                           </button>
-                          <span>Página {selectedPageIndex + 1} de {uploadedFile.pages.length}</span>
+
+                          <div style={{ fontSize: 13, color: "#e8aa40", fontWeight: 700 }}>
+                            Página {selectedPageIndex + 1} de {uploadedFile.pages.length}
+                          </div>
+
                           <button
+                            className="hb"
                             onClick={() => setSelectedPageIndex((i) => Math.min(uploadedFile.pages.length - 1, i + 1))}
                             disabled={selectedPageIndex === uploadedFile.pages.length - 1}
-                            style={{ background: "#1c1510", border: "1px solid #332618", color: "#c8892a", borderRadius: 5, padding: "3px 8px", cursor: selectedPageIndex === uploadedFile.pages.length - 1 ? "not-allowed" : "pointer" }}
+                            style={{
+                              background: selectedPageIndex === uploadedFile.pages.length - 1 ? "#14100b" : "linear-gradient(135deg,#c8892a,#e8aa40)",
+                              border: "none",
+                              color: selectedPageIndex === uploadedFile.pages.length - 1 ? "#4a3520" : "#0d0a07",
+                              borderRadius: 7,
+                              padding: "7px 14px",
+                              cursor: selectedPageIndex === uploadedFile.pages.length - 1 ? "not-allowed" : "pointer",
+                              fontWeight: 700,
+                              fontSize: 13,
+                            }}
                           >
-                            ▶
+                            Próxima ▶
                           </button>
                         </div>
                       </div>
                     )}
 
                     <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                      <label htmlFor={fileInputId} className="hb" style={{ background: "rgba(200,137,42,.14)", border: "1px solid rgba(200,137,42,.35)", borderRadius: 8, color: "#c8892a", padding: "7px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-block" }}>
+                      <label htmlFor={fileInputId} className="hb" style={{ background: "rgba(200,137,42,.14)", border: "1px solid rgba(200,137,42,.35)", borderRadius: 8, color: "#c8892a", padding: "8px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-block" }}>
                         🔄 Trocar Arquivo
                       </label>
-                      <button className="hb" onClick={() => { setUploadedFile(null); setPieces([]); setAnalysisError(null); }} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 8, color: "#b05050", padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+                      <button className="hb" onClick={() => { setUploadedFile(null); setPieces([]); setAnalysisError(null); }} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 8, color: "#b05050", padding: "8px 14px", fontSize: 12, cursor: "pointer" }}>
                         ✕ Remover
                       </button>
                     </div>
                   </>
                 ) : (
                   <>
-                    <div style={{ fontSize: 38 }}>📐</div>
+                    <div style={{ fontSize: 36 }}>📐</div>
                     <div style={{ fontFamily: "'Playfair Display'", fontSize: 17, color: "#8a6a40" }}>
                       Envie a planta, corte ou PDF do projeto
                     </div>
-                    <div style={{ fontSize: 12, color: "#4a3520" }}>Arraste foto, croqui ou documento PDF</div>
-                    <label htmlFor={fileInputId} className="hb" style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 9, color: "#0d0a07", padding: "11px 26px", fontFamily: "'Barlow Condensed'", fontWeight: 700, fontSize: 14, letterSpacing: ".1em", cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 16px rgba(200,137,42,.3)", display: "inline-block", marginTop: 4 }}>
-                      📁 Escolher Arquivo
+                    <div style={{ fontSize: 12, color: "#4a3520" }}>Toque para escolher foto ou arquivo</div>
+                    <label htmlFor={fileInputId} className="hb" style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 9, color: "#0d0a07", padding: "12px 28px", fontFamily: "'Barlow Condensed'", fontWeight: 700, fontSize: 15, letterSpacing: ".08em", cursor: "pointer", textTransform: "uppercase", boxShadow: "0 4px 16px rgba(200,137,42,.3)", display: "inline-block", marginTop: 4 }}>
+                      📁 Escolher Arquivo / Foto
                     </label>
                     <div style={{ fontSize: 11, color: "#3e2a18" }}>JPG · PNG · PDF de prancha técnica</div>
                   </>
@@ -1125,52 +1244,55 @@ export default function App() {
                 <input id={fileInputId} type="file" accept="image/*,.pdf" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
               </div>
 
-              {/* Botões de Ação da IA */}
+              {/* Botões de Ação da IA Mobile-First */}
               {uploadedFile && !uploadedFile.converting && (
-                <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
                   <button
                     className="hb"
-                    onClick={() => analyzeProject(false)}
+                    onClick={() => handleStartAnalysis(true)}
                     disabled={isAnalyzing}
                     style={{
-                      flex: 1,
-                      minWidth: 200,
-                      padding: "13px",
+                      width: "100%",
+                      padding: "14px",
                       background: isAnalyzing ? "#1a1610" : "linear-gradient(135deg,#c8892a,#e8aa40)",
                       border: "none",
                       borderRadius: 10,
                       color: isAnalyzing ? "#6a5540" : "#0d0a07",
                       fontFamily: "'Barlow Condensed'",
                       fontWeight: 700,
-                      fontSize: 15,
-                      letterSpacing: ".08em",
+                      fontSize: 16,
+                      letterSpacing: ".06em",
                       cursor: isAnalyzing ? "not-allowed" : "pointer",
                       textTransform: "uppercase",
-                      boxShadow: isAnalyzing ? "none" : "0 4px 16px rgba(200,137,42,.25)",
-                      transition: "all .2s",
+                      boxShadow: isAnalyzing ? "none" : "0 4px 16px rgba(200,137,42,.3)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 8,
                     }}
                   >
                     {isAnalyzing ? (
                       <>
                         <span className="spin">⚙️</span>{" "}
                         {analyzingProgress
-                          ? `Analisando pág. ${analyzingProgress.current}/${analyzingProgress.total}...`
+                          ? `Analisando pág. ${analyzingProgress.pageNum} (${analyzingProgress.current}/${analyzingProgress.total})...`
                           : "Processando com IA..."}
                       </>
                     ) : (
-                      `🤖 Analisar ${uploadedFile.isPdf && uploadedFile.pages?.length > 1 ? `Todas as Páginas (${uploadedFile.pages.length})` : "Projeto com IA"}`
+                      `🤖 Analisar Esta Página (Pág. ${selectedPageIndex + 1})`
                     )}
                   </button>
 
                   {uploadedFile.isPdf && uploadedFile.pages?.length > 1 && !isAnalyzing && (
                     <button
                       className="hb"
-                      onClick={() => analyzeProject(true)}
+                      onClick={() => handleStartAnalysis(false)}
                       style={{
-                        padding: "13px 18px",
+                        width: "100%",
+                        padding: "11px",
                         background: "rgba(200,137,42,.12)",
                         border: "1px solid rgba(200,137,42,.3)",
-                        borderRadius: 10,
+                        borderRadius: 9,
                         color: "#c8892a",
                         fontFamily: "'Barlow Condensed'",
                         fontWeight: 700,
@@ -1179,7 +1301,7 @@ export default function App() {
                         textTransform: "uppercase",
                       }}
                     >
-                      Analisar Apenas Pág. {selectedPageIndex + 1}
+                      📑 Analisar Projeto Inteiro ({uploadedFile.pages.length} páginas)
                     </button>
                   )}
 
@@ -1187,10 +1309,11 @@ export default function App() {
                     <button
                       onClick={stopAnalysis}
                       style={{
-                        padding: "13px 18px",
-                        background: "rgba(180,50,50,.15)",
-                        border: "1px solid rgba(180,50,50,.3)",
-                        borderRadius: 10,
+                        width: "100%",
+                        padding: "11px",
+                        background: "rgba(180,50,50,.18)",
+                        border: "1px solid rgba(180,50,50,.35)",
+                        borderRadius: 9,
                         color: "#d06060",
                         fontFamily: "'Barlow Condensed'",
                         fontWeight: 700,
@@ -1199,7 +1322,7 @@ export default function App() {
                         textTransform: "uppercase",
                       }}
                     >
-                      ⏹ Parar
+                      ⏹ Parar Análise
                     </button>
                   )}
                 </div>
@@ -1211,15 +1334,18 @@ export default function App() {
                   style={{
                     background: "#221010",
                     border: "1px solid #6a2525",
-                    borderRadius: 9,
-                    padding: "12px 16px",
+                    borderRadius: 10,
+                    padding: "14px 16px",
                     marginBottom: 14,
                     fontSize: 13,
                     color: "#d87070",
                     lineHeight: 1.5,
                   }}
                 >
-                  ⚠️ {analysisError}
+                  <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>⚠️ Atenção:</span>
+                  </div>
+                  {analysisError}
                 </div>
               )}
 
@@ -1242,8 +1368,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* Tabela de Peças Identificadas */}
-              <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, overflow: "hidden" }}>
+              {/* Lista de Peças Identificadas */}
+              <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, overflow: "hidden", marginBottom: 14 }}>
                 <div style={{ padding: "12px 16px", borderBottom: "1px solid #1a1006", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                   <span style={{ fontFamily: "'Playfair Display'", fontSize: 17 }}>
                     Peças Identificadas <span style={{ fontSize: 12, color: "#6a5038", fontFamily: "'Barlow'" }}>({pieces.length})</span>
@@ -1257,7 +1383,7 @@ export default function App() {
                           border: "none",
                           borderRadius: 6,
                           color: "#0d0a07",
-                          padding: "5px 12px",
+                          padding: "6px 12px",
                           fontSize: 12,
                           cursor: "pointer",
                           fontWeight: 700,
@@ -1276,7 +1402,7 @@ export default function App() {
                         border: "1px solid rgba(200,137,42,.3)",
                         borderRadius: 6,
                         color: "#c8892a",
-                        padding: "5px 12px",
+                        padding: "6px 12px",
                         fontSize: 12,
                         cursor: "pointer",
                         fontWeight: 600,
@@ -1292,90 +1418,153 @@ export default function App() {
                     Envie o projeto e clique em Analisar com IA, ou adicione peças manualmente no botão acima.
                   </div>
                 ) : (
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
-                      <thead>
-                        <tr style={{ background: "#150f07" }}>
-                          {["Peça", "Tipo", "Larg (m)", "Alt (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
-                            <th
-                              key={h}
-                              style={{
-                                padding: "8px 10px",
-                                textAlign: "left",
-                                fontSize: 9,
-                                color: "#6a5038",
-                                fontWeight: 700,
-                                letterSpacing: ".1em",
-                                textTransform: "uppercase",
-                                borderBottom: "1px solid #1a1006",
-                              }}
-                            >
-                              {h}
-                            </th>
+                  <>
+                    {/* Tabela para Computador (Desktop) */}
+                    <div className="desktop-table" style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
+                        <thead>
+                          <tr style={{ background: "#150f07" }}>
+                            {["Peça", "Tipo", "Larg (m)", "Alt (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
+                              <th
+                                key={h}
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "left",
+                                  fontSize: 9,
+                                  color: "#6a5038",
+                                  fontWeight: 700,
+                                  letterSpacing: ".1em",
+                                  textTransform: "uppercase",
+                                  borderBottom: "1px solid #1a1006",
+                                }}
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pieces.map((p) => (
+                            <tr key={p._id} className="hr" style={{ borderBottom: "1px solid #16100a" }}>
+                              <td style={{ padding: "6px 10px" }}>
+                                <div>
+                                  <input
+                                    value={p.nome}
+                                    onChange={(e) => updPiece(p._id, "nome", e.target.value)}
+                                    style={{ background: "transparent", border: "none", color: "#e0d0b0", fontFamily: "'Barlow'", fontSize: 12, width: "100%", outline: "none", fontWeight: 500 }}
+                                  />
+                                  {p.aviso && <div style={{ fontSize: 10, color: "#c8892a", marginTop: 1 }}>⚠️ {p.aviso}</div>}
+                                  {p._pagina && <div style={{ fontSize: 9, color: "#5a4430", marginTop: 1 }}>pág. {p._pagina}</div>}
+                                </div>
+                              </td>
+                              <td style={{ padding: "6px 4px" }}>
+                                <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 72 }}>
+                                  {["m²", "ml", "unidade", "%"].map((t) => (
+                                    <option key={t}>{t}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td style={{ padding: "6px 4px" }}>
+                                <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
+                              </td>
+                              <td style={{ padding: "6px 4px" }}>
+                                <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
+                              </td>
+                              <td style={{ padding: "6px 4px" }}>
+                                <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, width: 44, padding: "4px 5px", fontSize: 12, color: "#f0e0c8" }} />
+                              </td>
+                              <td style={{ padding: "6px 4px" }}>
+                                <input type="number" value={p.precoUnitario || ""} onChange={(e) => updPiece(p._id, "precoUnitario", e.target.value)} style={{ ...NS, width: 72, padding: "4px 5px", fontSize: 12 }} />
+                              </td>
+                              <td style={{ padding: "6px 10px", fontFamily: "'Barlow Condensed'", fontSize: 13, fontWeight: 700, color: "#c8892a", whiteSpace: "nowrap" }}>
+                                {fmtBRL(calcLine(p))}
+                              </td>
+                              <td style={{ padding: "6px 6px" }}>
+                                <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#6a3030", cursor: "pointer", fontSize: 14 }}>
+                                  ✕
+                                </button>
+                              </td>
+                            </tr>
                           ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pieces.map((p) => (
-                          <tr key={p._id} className="hr" style={{ borderBottom: "1px solid #16100a" }}>
-                            <td style={{ padding: "6px 10px" }}>
-                              <div>
-                                <input
-                                  value={p.nome}
-                                  onChange={(e) => updPiece(p._id, "nome", e.target.value)}
-                                  style={{ background: "transparent", border: "none", color: "#e0d0b0", fontFamily: "'Barlow'", fontSize: 12, width: "100%", outline: "none", fontWeight: 500 }}
-                                />
-                                {p.aviso && <div style={{ fontSize: 10, color: "#c8892a", marginTop: 1 }}>⚠️ {p.aviso}</div>}
-                                {p._pagina && <div style={{ fontSize: 9, color: "#5a4430", marginTop: 1 }}>pág. {p._pagina}</div>}
-                              </div>
-                            </td>
-                            <td style={{ padding: "6px 4px" }}>
-                              <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 72 }}>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Lista em Cards para Celular (Mobile) */}
+                    <div className="mobile-card-list" style={{ padding: "10px" }}>
+                      {pieces.map((p, idx) => (
+                        <div
+                          key={p._id}
+                          style={{
+                            background: "#16110a",
+                            border: "1px solid #2a1c0e",
+                            borderRadius: 10,
+                            padding: 12,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                              <span style={{ background: "#c8892a", color: "#000", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, fontFamily: "monospace" }}>
+                                P{String(idx + 1).padStart(2, "0")}
+                              </span>
+                              <input
+                                value={p.nome}
+                                onChange={(e) => updPiece(p._id, "nome", e.target.value)}
+                                style={{ ...IS, padding: "5px 8px", fontSize: 13, fontWeight: 600 }}
+                              />
+                            </div>
+                            <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#8a4040", cursor: "pointer", fontSize: 16, paddingLeft: 8 }}>
+                              ✕
+                            </button>
+                          </div>
+
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+                            <div>
+                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Larg (m)</span>
+                              <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                            </div>
+                            <div>
+                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Alt (m)</span>
+                              <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                            </div>
+                            <div>
+                              <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Qtd</span>
+                              <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                            </div>
+                          </div>
+
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #22160a", paddingTop: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, width: 68, padding: "4px 6px", fontSize: 11 }}>
                                 {["m²", "ml", "unidade", "%"].map((t) => (
                                   <option key={t}>{t}</option>
                                 ))}
                               </select>
-                            </td>
-                            <td style={{ padding: "6px 4px" }}>
-                              <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
-                            </td>
-                            <td style={{ padding: "6px 4px" }}>
-                              <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
-                            </td>
-                            <td style={{ padding: "6px 4px" }}>
-                              <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, width: 44, padding: "4px 5px", fontSize: 12, color: "#f0e0c8" }} />
-                            </td>
-                            <td style={{ padding: "6px 4px" }}>
-                              <input type="number" value={p.precoUnitario || ""} onChange={(e) => updPiece(p._id, "precoUnitario", e.target.value)} style={{ ...NS, width: 72, padding: "4px 5px", fontSize: 12 }} />
-                            </td>
-                            <td style={{ padding: "6px 10px", fontFamily: "'Barlow Condensed'", fontSize: 13, fontWeight: 700, color: "#c8892a", whiteSpace: "nowrap" }}>
+                              <span style={{ fontSize: 11, color: "#7a6040" }}>{fmtBRL(p.precoUnitario || 0)}</span>
+                            </div>
+                            <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 16, fontWeight: 700, color: "#e8aa40" }}>
                               {fmtBRL(calcLine(p))}
-                            </td>
-                            <td style={{ padding: "6px 6px" }}>
-                              <button onClick={() => delPiece(p._id)} style={{ background: "none", border: "none", color: "#6a3030", cursor: "pointer", fontSize: 14 }}>
-                                ✕
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 )}
               </div>
             </div>
 
-            {/* Coluna Direita: Card de Resumo e Ações de Exportação */}
+            {/* Coluna Direita / Abaixo no Mobile: Card de Resumo */}
             <div>
-              <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 14, padding: "18px", position: "sticky", top: 18 }}>
+              <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 14, padding: "18px" }}>
                 <div style={{ fontFamily: "'Playfair Display'", fontSize: 20, marginBottom: 14 }}>Resumo</div>
                 {quote.lines.length === 0 ? (
-                  <div style={{ color: "#4a3520", fontSize: 13, textAlign: "center", padding: "24px 0" }}>
+                  <div style={{ color: "#4a3520", fontSize: 13, textAlign: "center", padding: "20px 0" }}>
                     Adicione ou extraia peças para visualizar o cálculo total
                   </div>
                 ) : (
                   <>
-                    <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 14, paddingRight: 4 }}>
+                    <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 14, paddingRight: 4 }}>
                       {quote.lines.map((l) => (
                         <div key={l._id} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #16100a", gap: 8 }}>
                           <div>
@@ -1396,7 +1585,7 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div style={{ borderTop: "1px solid #2a1c0a", paddingTop: 12 }}>
+                    <div style={{ borderTop: "1px solid #2a1c0a", paddingTop: 10 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                         <span style={{ fontSize: 12, color: "#7a6040" }}>Subtotal materiais</span>
                         <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 14, color: "#c0b090", fontWeight: 600 }}>{fmtBRL(quote.subtotal)}</span>
@@ -1432,15 +1621,15 @@ export default function App() {
                       style={{
                         width: "100%",
                         marginTop: 12,
-                        padding: "11px",
+                        padding: "12px",
                         background: "linear-gradient(135deg,#c8892a,#e8aa40)",
                         border: "none",
                         borderRadius: 9,
                         color: "#0d0a07",
                         fontFamily: "'Barlow Condensed'",
                         fontWeight: 700,
-                        fontSize: 14,
-                        letterSpacing: ".08em",
+                        fontSize: 15,
+                        letterSpacing: ".06em",
                         cursor: "pointer",
                         textTransform: "uppercase",
                         transition: "all .2s",
@@ -1454,7 +1643,7 @@ export default function App() {
                       onClick={saveQuote}
                       style={{
                         width: "100%",
-                        marginTop: 6,
+                        marginTop: 8,
                         padding: "11px",
                         background: "linear-gradient(135deg,#1e4a10,#2e6a18)",
                         border: "none",
@@ -1466,7 +1655,6 @@ export default function App() {
                         letterSpacing: ".08em",
                         cursor: "pointer",
                         textTransform: "uppercase",
-                        transition: "all .2s",
                       }}
                     >
                       💾 Salvar Orçamento
@@ -1476,7 +1664,7 @@ export default function App() {
                       onClick={generatePDF}
                       style={{
                         width: "100%",
-                        marginTop: 6,
+                        marginTop: 8,
                         padding: "11px",
                         background: "linear-gradient(135deg,#1a2a4a,#2a4a8a)",
                         border: "none",
@@ -1488,7 +1676,6 @@ export default function App() {
                         letterSpacing: ".08em",
                         cursor: "pointer",
                         textTransform: "uppercase",
-                        transition: "all .2s",
                       }}
                     >
                       📄 Gerar PDF Comercial
@@ -1505,7 +1692,7 @@ export default function App() {
                       }}
                       style={{
                         width: "100%",
-                        marginTop: 6,
+                        marginTop: 8,
                         padding: "9px",
                         background: "transparent",
                         border: "1px solid #2a1c0a",
@@ -1539,22 +1726,20 @@ export default function App() {
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
               <div>
-                <div style={{ fontFamily: "'Playfair Display'", fontSize: 26, marginBottom: 4 }}>🧠 Treinamento do Agente</div>
+                <div style={{ fontFamily: "'Playfair Display'", fontSize: 24, marginBottom: 4 }}>🧠 Treinamento do Agente</div>
                 <div style={{ fontSize: 13, color: "#7a6040", maxWidth: 520, lineHeight: 1.5 }}>
-                  As <strong style={{ color: "#c8892a" }}>Regras de Preço</strong> e <strong style={{ color: "#c8892a" }}>Exemplos Reais</strong> são injetados automaticamente no prompt de cada análise para que a IA aprenda seu padrão exato.
+                  As <strong style={{ color: "#c8892a" }}>Regras de Preço</strong> e <strong style={{ color: "#c8892a" }}>Exemplos Reais</strong> ensinam a IA o seu padrão de cálculo.
                 </div>
               </div>
-              <div style={{ background: "rgba(200,137,42,.06)", border: "1px solid rgba(200,137,42,.15)", borderRadius: 10, padding: "12px 16px", fontSize: 12, color: "#8a7050", textAlign: "right" }}>
-                <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 22, color: "#c8892a", fontWeight: 700 }}>{rules.length}</div>
+              <div style={{ background: "rgba(200,137,42,.06)", border: "1px solid rgba(200,137,42,.15)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#8a7050", textAlign: "right" }}>
+                <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 20, color: "#c8892a", fontWeight: 700 }}>{rules.length}</div>
                 <div>regras ativas</div>
-                <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 22, color: "#c8892a", fontWeight: 700, marginTop: 6 }}>{examples.length}</div>
-                <div>exemplos</div>
               </div>
             </div>
 
             <div style={{ marginBottom: 28 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <div style={{ fontFamily: "'Playfair Display'", fontSize: 20 }}>📋 Tabela de Preços por Tipo</div>
+                <div style={{ fontFamily: "'Playfair Display'", fontSize: 18 }}>📋 Tabela de Preços</div>
                 <button
                   className="hb"
                   onClick={() => setShowAddRule((v) => !v)}
@@ -1563,11 +1748,10 @@ export default function App() {
                     border: "none",
                     borderRadius: 8,
                     color: "#0d0a07",
-                    padding: "8px 18px",
+                    padding: "7px 14px",
                     fontFamily: "'Barlow Condensed'",
                     fontWeight: 700,
                     fontSize: 12,
-                    letterSpacing: ".08em",
                     cursor: "pointer",
                     textTransform: "uppercase",
                   }}
@@ -1577,19 +1761,19 @@ export default function App() {
               </div>
 
               {showAddRule && (
-                <div style={{ background: "#18120a", border: "1px solid #c8892a", borderRadius: 12, padding: "16px 18px", marginBottom: 16 }}>
-                  <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, color: "#c8892a", marginBottom: 12 }}>Cadastrar Regra de Preço</div>
-                  <div className="rule-add-grid" style={{ display: "grid", gridTemplateColumns: "160px 1fr 70px 100px auto", gap: 8, alignItems: "end", marginBottom: 8 }}>
+                <div style={{ background: "#18120a", border: "1px solid #c8892a", borderRadius: 12, padding: "14px", marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, color: "#c8892a", marginBottom: 10 }}>Cadastrar Regra de Preço</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
                     <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Categoria</label>
+                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", marginBottom: 4 }}>Categoria</label>
                       <input value={newRule.category} onChange={(e) => setNewRule((p) => ({ ...p, category: e.target.value }))} style={IS} />
                     </div>
                     <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Descrição</label>
-                      <input value={newRule.label} onChange={(e) => setNewRule((p) => ({ ...p, label: e.target.value }))} placeholder="Ex: Porta de correr espelho" style={IS} />
+                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", marginBottom: 4 }}>Descrição</label>
+                      <input value={newRule.label} onChange={(e) => setNewRule((p) => ({ ...p, label: e.target.value }))} placeholder="Ex: Porta espelho" style={IS} />
                     </div>
                     <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Unid.</label>
+                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", marginBottom: 4 }}>Unid.</label>
                       <select value={newRule.unit} onChange={(e) => setNewRule((p) => ({ ...p, unit: e.target.value }))} style={IS}>
                         {["m²", "ml", "un", "%", "diária"].map((u) => (
                           <option key={u}>{u}</option>
@@ -1597,27 +1781,27 @@ export default function App() {
                       </select>
                     </div>
                     <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Preço</label>
+                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", marginBottom: 4 }}>Preço (R$)</label>
                       <input type="number" value={newRule.price} onChange={(e) => setNewRule((p) => ({ ...p, price: e.target.value }))} style={{ ...NS, textAlign: "left" }} />
                     </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        onClick={() => {
-                          if (!newRule.label || !newRule.price) return;
-                          saveRules([...rules, { ...newRule, id: Date.now(), price: parseFloat(newRule.price) }]);
-                          setNewRule({ category: "Armário/Guarda-roupa", label: "", unit: "m²", price: "", note: "" });
-                          setShowAddRule(false);
-                        }}
-                        style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 7, color: "#0d0a07", padding: "8px 14px", fontFamily: "'Barlow Condensed'", fontWeight: 700, cursor: "pointer" }}
-                      >
-                        ✓
-                      </button>
-                      <button onClick={() => setShowAddRule(false)} style={{ background: "#1e1610", border: "1px solid #2e1f0e", borderRadius: 7, color: "#5a4838", padding: "8px 10px", cursor: "pointer" }}>
-                        ✕
-                      </button>
-                    </div>
                   </div>
-                  <input value={newRule.note} onChange={(e) => setNewRule((p) => ({ ...p, note: e.target.value }))} placeholder="Observação / instrução para o agente..." style={IS} />
+                  <input value={newRule.note} onChange={(e) => setNewRule((p) => ({ ...p, note: e.target.value }))} placeholder="Observação para o agente..." style={{ ...IS, marginBottom: 8 }} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => {
+                        if (!newRule.label || !newRule.price) return;
+                        saveRules([...rules, { ...newRule, id: Date.now(), price: parseFloat(newRule.price) }]);
+                        setNewRule({ category: "Armário/Guarda-roupa", label: "", unit: "m²", price: "", note: "" });
+                        setShowAddRule(false);
+                      }}
+                      style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 7, color: "#0d0a07", padding: "8px 16px", fontFamily: "'Barlow Condensed'", fontWeight: 700, cursor: "pointer" }}
+                    >
+                      Salvar Regra
+                    </button>
+                    <button onClick={() => setShowAddRule(false)} style={{ background: "#1e1610", border: "1px solid #2e1f0e", borderRadius: 7, color: "#5a4838", padding: "8px 12px", cursor: "pointer" }}>
+                      ✕
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1626,53 +1810,26 @@ export default function App() {
                 if (!catRules.length) return null;
                 const color = CAT_COLORS[cat] || "#8a7a6a";
                 return (
-                  <div key={cat} style={{ marginBottom: 16 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
-                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: color }} />
-                      <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 11, fontWeight: 700, letterSpacing: ".12em", textTransform: "uppercase", color }}>
+                  <div key={cat} style={{ marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: color }} />
+                      <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 11, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color }}>
                         {cat}
                       </span>
                     </div>
                     <div style={{ background: "#110e09", border: "1px solid #1a1006", borderRadius: 10, overflow: "hidden" }}>
                       {catRules.map((r, i) => (
-                        <div key={r.id} className="hr" style={{ display: "flex", alignItems: "center", padding: "10px 16px", borderBottom: i < catRules.length - 1 ? "1px solid #16100a" : "none", gap: 10, flexWrap: "wrap" }}>
-                          {editingRule === r.id ? (
-                            <>
-                              <input defaultValue={r.label} id={`rl-${r.id}`} style={{ ...IS, flex: 1, minWidth: 160 }} />
-                              <input type="number" defaultValue={r.price} id={`rp-${r.id}`} style={{ ...NS, width: 90 }} />
-                              <button
-                                onClick={() => {
-                                  const l = document.getElementById(`rl-${r.id}`).value;
-                                  const p = parseFloat(document.getElementById(`rp-${r.id}`).value);
-                                  saveRules(rules.map((x) => (x.id === r.id ? { ...x, label: l, price: p } : x)));
-                                  setEditingRule(null);
-                                }}
-                                style={{ background: "rgba(200,137,42,.15)", border: "1px solid rgba(200,137,42,.3)", borderRadius: 6, color: "#c8892a", padding: "5px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-                              >
-                                ✓
-                              </button>
-                              <button onClick={() => setEditingRule(null)} style={{ background: "none", border: "none", color: "#5a4838", cursor: "pointer" }}>
-                                ✕
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <div style={{ flex: 1, minWidth: 180 }}>
-                                <div style={{ fontSize: 13, color: "#d0c0a0" }}>{r.label}</div>
-                                {r.note && <div style={{ fontSize: 11, color: "#6a5038", marginTop: 2 }}>{r.note}</div>}
-                              </div>
-                              <span style={{ fontSize: 10, color: "#5a4430", marginRight: 4 }}>/{r.unit}</span>
-                              <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 16, fontWeight: 700, color, minWidth: 80, textAlign: "right" }}>
-                                {fmtBRL(r.price)}
-                              </span>
-                              <button onClick={() => setEditingRule(r.id)} style={{ background: "none", border: "none", color: "#5a4838", cursor: "pointer", marginLeft: 6, fontSize: 14 }}>
-                                ✏️
-                              </button>
-                              <button onClick={() => saveRules(rules.filter((x) => x.id !== r.id))} style={{ background: "none", border: "none", color: "#5a2020", cursor: "pointer", fontSize: 14 }}>
-                                🗑️
-                              </button>
-                            </>
-                          )}
+                        <div key={r.id} className="hr" style={{ display: "flex", alignItems: "center", padding: "8px 12px", borderBottom: i < catRules.length - 1 ? "1px solid #16100a" : "none", gap: 8 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 12, color: "#d0c0a0" }}>{r.label}</div>
+                            {r.note && <div style={{ fontSize: 10, color: "#6a5038", marginTop: 2 }}>{r.note}</div>}
+                          </div>
+                          <span style={{ fontFamily: "'Barlow Condensed'", fontSize: 14, fontWeight: 700, color, minWidth: 70, textAlign: "right" }}>
+                            {fmtBRL(r.price)}/{r.unit}
+                          </span>
+                          <button onClick={() => saveRules(rules.filter((x) => x.id !== r.id))} style={{ background: "none", border: "none", color: "#6a2525", cursor: "pointer", fontSize: 13, padding: "0 4px" }}>
+                            🗑️
+                          </button>
                         </div>
                       ))}
                     </div>
@@ -1680,148 +1837,52 @@ export default function App() {
                 );
               })}
             </div>
-
-            <div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-                <div>
-                  <div style={{ fontFamily: "'Playfair Display'", fontSize: 20, marginBottom: 2 }}>📸 Exemplos Reais (Few-shot)</div>
-                  <div style={{ fontSize: 12, color: "#6a5038" }}>Orçamentos seus que ensinam o agente o seu método de cálculo</div>
-                </div>
-                <button
-                  className="hb"
-                  onClick={() => setShowAddExample((v) => !v)}
-                  style={{
-                    background: "linear-gradient(135deg,#c8892a,#e8aa40)",
-                    border: "none",
-                    borderRadius: 8,
-                    color: "#0d0a07",
-                    padding: "8px 18px",
-                    fontFamily: "'Barlow Condensed'",
-                    fontWeight: 700,
-                    fontSize: 12,
-                    letterSpacing: ".08em",
-                    cursor: "pointer",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  + Novo Exemplo
-                </button>
-              </div>
-
-              {showAddExample && (
-                <div style={{ background: "#18120a", border: "1px solid #c8892a", borderRadius: 12, padding: "16px 18px", marginBottom: 16 }}>
-                  <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, color: "#c8892a", marginBottom: 12 }}>Adicionar Exemplo Real</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 10 }}>
-                    <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Título do exemplo</label>
-                      <input value={newExample.label} onChange={(e) => setNewExample((p) => ({ ...p, label: e.target.value }))} placeholder="Ex: Guarda-roupa casal 2,40m" style={IS} />
-                    </div>
-                    <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Ambiente</label>
-                      <input value={newExample.ambiente} onChange={(e) => setNewExample((p) => ({ ...p, ambiente: e.target.value }))} placeholder="Ex: Quarto" style={IS} />
-                    </div>
-                    <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Dimensões</label>
-                      <input value={newExample.dimensoes} onChange={(e) => setNewExample((p) => ({ ...p, dimensoes: e.target.value }))} placeholder="L:2,21m A:2,63m P:0,56m" style={IS} />
-                    </div>
-                    <div>
-                      <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Total (R$)</label>
-                      <input type="number" value={newExample.total} onChange={(e) => setNewExample((p) => ({ ...p, total: e.target.value }))} placeholder="8165" style={{ ...NS, textAlign: "left" }} />
-                    </div>
-                  </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Descrição do móvel</label>
-                    <input value={newExample.descricao} onChange={(e) => setNewExample((p) => ({ ...p, descricao: e.target.value }))} placeholder="Ex: 3 portas de correr sendo 1 espelho, MDF Gris, RO45 Rometal" style={IS} />
-                  </div>
-                  <div style={{ marginBottom: 12 }}>
-                    <label style={{ display: "block", fontSize: 9, color: "#7a6040", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Cálculo detalhado</label>
-                    <input value={newExample.calculo} onChange={(e) => setNewExample((p) => ({ ...p, calculo: e.target.value }))} placeholder="Ex: Corpo: 2,21×2,63×R$1.250=R$7.265 | Portas: 3×R$900=R$2.700" style={IS} />
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button
-                      onClick={() => {
-                        if (!newExample.label) return;
-                        saveExamples([...examples, { ...newExample, id: Date.now(), total: parseFloat(newExample.total) || 0 }]);
-                        setNewExample({ label: "", ambiente: "", dimensoes: "", descricao: "", calculo: "", total: "" });
-                        setShowAddExample(false);
-                      }}
-                      style={{ background: "linear-gradient(135deg,#c8892a,#e8aa40)", border: "none", borderRadius: 7, color: "#0d0a07", padding: "9px 20px", fontFamily: "'Barlow Condensed'", fontWeight: 700, cursor: "pointer" }}
-                    >
-                      Salvar Exemplo
-                    </button>
-                    <button onClick={() => setShowAddExample(false)} style={{ background: "#1e1610", border: "1px solid #2e1f0e", borderRadius: 7, color: "#5a4838", padding: "9px 14px", cursor: "pointer" }}>
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-                {examples.map((ex) => (
-                  <div key={ex.id} style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, padding: "16px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                      <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, color: "#d0c0a0", flex: 1, marginRight: 8 }}>{ex.label}</div>
-                      <button onClick={() => saveExamples(examples.filter((e) => e.id !== ex.id))} style={{ background: "none", border: "none", color: "#5a2020", cursor: "pointer", fontSize: 14 }}>
-                        🗑️
-                      </button>
-                    </div>
-                    <div style={{ fontSize: 12, color: "#6a5038", marginBottom: 6 }}>📍 {ex.ambiente} · {ex.dimensoes}</div>
-                    {ex.descricao && <div style={{ fontSize: 12, color: "#8a7050", marginBottom: 8, lineHeight: 1.5 }}>{ex.descricao}</div>}
-                    {ex.calculo && <div style={{ background: "#0f0c07", border: "1px solid #2a1c0a", borderRadius: 8, padding: "8px 12px", fontSize: 11, color: "#a08050", fontFamily: "monospace", lineHeight: 1.6 }}>{ex.calculo}</div>}
-                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
-                      <span style={{ fontFamily: "'Playfair Display'", fontSize: 18, color: "#e8aa40", fontWeight: 700 }}>{fmtBRL(ex.total)}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
         )}
 
         {/* Aba 4: Histórico */}
         {tab === "history" && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-              <div style={{ fontFamily: "'Playfair Display'", fontSize: 26 }}>
-                Histórico <span style={{ fontSize: 14, color: "#6a5540", fontFamily: "'Barlow'", fontWeight: 400 }}>({history.length})</span>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontFamily: "'Playfair Display'", fontSize: 22 }}>
+                Histórico <span style={{ fontSize: 13, color: "#6a5540", fontFamily: "'Barlow'", fontWeight: 400 }}>({history.length})</span>
               </div>
               {history.length > 0 && (
                 <button
                   onClick={() => {
                     if (confirm("Deseja apagar todo o histórico de orçamentos?")) saveHistory([]);
                   }}
-                  style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 7, color: "#c06060", padding: "7px 14px", fontSize: 12, cursor: "pointer" }}
+                  style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 7, color: "#c06060", padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
                 >
                   🗑️ Limpar
                 </button>
               )}
             </div>
             {history.length === 0 ? (
-              <div style={{ textAlign: "center", padding: "60px 20px", color: "#4a3520", fontFamily: "'Playfair Display'", fontSize: 15 }}>
+              <div style={{ textAlign: "center", padding: "50px 16px", color: "#4a3520", fontFamily: "'Playfair Display'", fontSize: 15 }}>
                 Nenhum orçamento salvo no histórico ainda.
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
                 {history.map((q) => (
                   <div
                     key={q.id}
-                    className="hcard"
                     onClick={() => setExpandedHistory(expandedHistory === q.id ? null : q.id)}
-                    style={{ background: "#110e09", border: `1px solid ${expandedHistory === q.id ? "#c8892a" : "#1e1409"}`, borderRadius: 12, padding: 16, cursor: "pointer", transition: "border-color .2s" }}
+                    style={{ background: "#110e09", border: `1px solid ${expandedHistory === q.id ? "#c8892a" : "#1e1409"}`, borderRadius: 12, padding: 14, cursor: "pointer" }}
                   >
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                      <div style={{ fontFamily: "'Playfair Display'", fontSize: 16 }}>{q.client}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                      <div style={{ fontFamily: "'Playfair Display'", fontSize: 15, fontWeight: 700 }}>{q.client}</div>
                       <div style={{ fontSize: 11, color: "#6a5540" }}>{q.date}</div>
                     </div>
-                    {q.notes && <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 10 }}>{q.notes}</div>}
+                    {q.notes && <div style={{ fontSize: 11, color: "#7a6040", marginBottom: 8 }}>{q.notes}</div>}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ fontSize: 11, color: "#5a4430" }}>{q.pieces?.length || 0} peças</span>
-                      <span style={{ fontFamily: "'Playfair Display'", fontSize: 18, color: "#e8aa40", fontWeight: 700 }}>{fmtBRL(q.total)}</span>
+                      <span style={{ fontFamily: "'Playfair Display'", fontSize: 17, color: "#e8aa40", fontWeight: 700 }}>{fmtBRL(q.total)}</span>
                     </div>
                     {expandedHistory === q.id && q.pieces?.length > 0 && (
-                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #1a1006" }}>
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #1a1006" }}>
                         {q.pieces.map((p, i) => (
-                          <div key={i} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                          <div key={i} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
                             <span style={{ fontSize: 11, color: "#9a8a70" }}>{p.quantidade}× {p.nome}</span>
                             <span style={{ fontSize: 11, color: "#c8892a", fontFamily: "'Barlow Condensed'", fontWeight: 600 }}>{fmtBRL(calcLine(p))}</span>
                           </div>
