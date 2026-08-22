@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import PlanoCorteView from "./components/PlanoCorteView";
 
 // Limiar para alertar o usuário sobre PDFs com muitas páginas
 const LARGE_PDF_PAGE_THRESHOLD = 5;
@@ -144,7 +145,7 @@ export default function App() {
   const saveExamples = (e) => { setExamples(e); lsSet("om_examples_v1", e); };
   const saveHistory = (h) => { setHistory(h); lsSet("om_history_v2", h); };
 
-  // Otimização de Imagem em Canvas (mantém cotas nítidas com baixo consumo de memória)
+  // Otimização de Imagem em Canvas
   const resizeImageToDataUrl = (img, maxDimension = 1600, quality = 0.82) => {
     let { width, height } = img;
     if (width > maxDimension || height > maxDimension) {
@@ -185,7 +186,6 @@ export default function App() {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const unscaledViewport = page.getViewport({ scale: 1 });
-      // Escala calculada para máximo de 1600px de largura/altura (excelente nitidez com ~150KB por página)
       const maxDim = Math.max(unscaledViewport.width, unscaledViewport.height);
       const scale = Math.min(2.0, 1600 / maxDim);
       const vp = page.getViewport({ scale });
@@ -239,19 +239,17 @@ export default function App() {
     }
   };
 
-  // Parser JSON Ultra-Resiliente (remove marcações Markdown, corrige vírgulas extras e caracteres de controle)
+  // Parser JSON Ultra-Resiliente
   const extractJSON = (raw) => {
     if (!raw) throw new Error("Resposta vazia da IA.");
     if (typeof raw === "object" && raw !== null) return raw;
     let s = String(raw).trim();
 
-    // 1. Extrai conteúdo de blocos de código Markdown ```json ... ```
     const codeBlockMatch = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
     if (codeBlockMatch) {
       s = codeBlockMatch[1].trim();
     }
 
-    // 2. Extrai o bloco de chaves mais externo
     const firstBrace = s.indexOf("{");
     const lastBrace = s.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -261,16 +259,14 @@ export default function App() {
     try {
       return JSON.parse(s);
     } catch (e1) {
-      // 3. Sanitização contra erros comuns de formatação de LLMs
       let cleaned = s
-        .replace(/,\s*([\}\]])/g, "$1") // Remove trailing commas
-        .replace(/\/\/[^\n\r]*/g, "") // Remove comentários //
-        .replace(/[\u0000-\u001F\u007F-\u009F]/g, (c) => (c === "\n" || c === "\r" || c === "\t" ? c : "")); // Limpa caracteres de controle invisíveis
+        .replace(/,\s*([\}\]])/g, "$1")
+        .replace(/\/\/[^\n\r]*/g, "")
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, (c) => (c === "\n" || c === "\r" || c === "\t" ? c : ""));
 
       try {
         return JSON.parse(cleaned);
       } catch (e2) {
-        // 4. Fallback: extrai a lista de peças via regex se o JSON raiz estiver corrompido
         const pecasMatch = s.match(/"pecas"\s*:\s*(\[[^\]]*\])/);
         if (pecasMatch) {
           try {
@@ -398,7 +394,6 @@ export default function App() {
     const systemPrompt = buildSystemPrompt(rules, examples);
     const allImages = uploadedFile.isPdf ? (uploadedFile.pages || []) : [uploadedFile.dataUrl || uploadedFile.preview];
     
-    // Define quais páginas serão processadas
     const imagesToAnalyze = onlyCurrentPage
       ? [{ img: allImages[selectedPageIndex], pageNum: selectedPageIndex + 1 }]
       : allImages.map((img, idx) => ({ img, pageNum: idx + 1 }));
@@ -813,10 +808,10 @@ export default function App() {
             </div>
             <div>
               <div style={{ fontFamily: "'Playfair Display'", fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em" }}>
-                OrcaMóvel
+                OrcaMóvel <span style={{ fontSize: 13, color: "#e8aa40", fontFamily: "'Barlow Condensed'", fontWeight: 600, background: "rgba(200,137,42,.15)", padding: "2px 6px", borderRadius: 4, marginLeft: 4 }}>+ CorteSmart</span>
               </div>
               <div style={{ fontSize: 10, color: "#8a6a40", letterSpacing: ".12em", textTransform: "uppercase", fontWeight: 600 }}>
-                Agente IA · Móveis Planejados
+                Orçamento com IA & Plano de Corte 2D
               </div>
             </div>
           </div>
@@ -878,7 +873,7 @@ export default function App() {
                     </a>
                   </div>
                   <div style={{ fontSize: 11, color: "#5a4430", lineHeight: 1.4, borderTop: "1px solid #2a1c0e", paddingTop: 8 }}>
-                    💡 Se deixar em branco, o app tentará usar a chave protegida do servidor na Vercel (<code>OPENROUTER_API_KEY</code>).
+                    💡 Se deixar em branco, o app usará a chave configurada no servidor na Vercel (<code>OPENROUTER_API_KEY</code>).
                   </div>
                   <button
                     onClick={() => setShowKeyInput(false)}
@@ -934,10 +929,11 @@ export default function App() {
         </div>
       </header>
 
-      {/* Tabs Navigation */}
+      {/* Tabs Navigation (com a nova aba Plano de Corte) */}
       <nav style={{ background: "#110e09", borderBottom: "1px solid #1a1006", padding: "0 16px", display: "flex", overflowX: "auto" }}>
         {[
           { id: "quote", icon: "📐", label: "Orçamento" },
+          { id: "corte", icon: "🪚", label: `Plano de Corte${pieces.length > 0 ? ` (${pieces.length})` : ""}` },
           { id: "training", icon: "🧠", label: "Treinamento" },
           { id: "history", icon: "📋", label: "Histórico" },
         ].map((t) => (
@@ -990,9 +986,9 @@ export default function App() {
 
       {/* Main Container */}
       <main className="main-content" style={{ maxWidth: 1160, margin: "0 auto", padding: "20px 20px" }}>
+        {/* Aba 1: Orçamento Comercial */}
         {tab === "quote" && (
           <div className="layout-grid">
-            {/* Coluna Esquerda: Upload, Configuração e Peças */}
             <div>
               <div className="client-inputs">
                 <div>
@@ -1188,7 +1184,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* Mensagem de Erro / Alerta */}
+              {/* Alerta de Erro */}
               {analysisError && (
                 <div
                   style={{
@@ -1227,25 +1223,47 @@ export default function App() {
 
               {/* Tabela de Peças Identificadas */}
               <div style={{ background: "#110e09", border: "1px solid #1e1409", borderRadius: 12, overflow: "hidden" }}>
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid #1a1006", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #1a1006", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                   <span style={{ fontFamily: "'Playfair Display'", fontSize: 17 }}>
-                    Peças <span style={{ fontSize: 12, color: "#6a5038", fontFamily: "'Barlow'" }}>({pieces.length})</span>
+                    Peças Identificadas <span style={{ fontSize: 12, color: "#6a5038", fontFamily: "'Barlow'" }}>({pieces.length})</span>
                   </span>
-                  <button
-                    onClick={addPiece}
-                    style={{
-                      background: "rgba(200,137,42,.12)",
-                      border: "1px solid rgba(200,137,42,.3)",
-                      borderRadius: 6,
-                      color: "#c8892a",
-                      padding: "5px 12px",
-                      fontSize: 12,
-                      cursor: "pointer",
-                      fontWeight: 600,
-                    }}
-                  >
-                    + Manual
-                  </button>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {pieces.length > 0 && (
+                      <button
+                        onClick={() => setTab("corte")}
+                        style={{
+                          background: "linear-gradient(135deg,#c8892a,#e8aa40)",
+                          border: "none",
+                          borderRadius: 6,
+                          color: "#0d0a07",
+                          padding: "5px 12px",
+                          fontSize: 12,
+                          cursor: "pointer",
+                          fontWeight: 700,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        🪚 Ver Plano de Corte
+                      </button>
+                    )}
+                    <button
+                      onClick={addPiece}
+                      style={{
+                        background: "rgba(200,137,42,.12)",
+                        border: "1px solid rgba(200,137,42,.3)",
+                        borderRadius: 6,
+                        color: "#c8892a",
+                        padding: "5px 12px",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      + Manual
+                    </button>
+                  </div>
                 </div>
 
                 {pieces.length === 0 ? (
@@ -1389,10 +1407,33 @@ export default function App() {
 
                     <button
                       className="hb"
-                      onClick={saveQuote}
+                      onClick={() => setTab("corte")}
                       style={{
                         width: "100%",
                         marginTop: 12,
+                        padding: "11px",
+                        background: "linear-gradient(135deg,#c8892a,#e8aa40)",
+                        border: "none",
+                        borderRadius: 9,
+                        color: "#0d0a07",
+                        fontFamily: "'Barlow Condensed'",
+                        fontWeight: 700,
+                        fontSize: 14,
+                        letterSpacing: ".08em",
+                        cursor: "pointer",
+                        textTransform: "uppercase",
+                        transition: "all .2s",
+                      }}
+                    >
+                      🪚 Gerar Plano de Corte 2D
+                    </button>
+
+                    <button
+                      className="hb"
+                      onClick={saveQuote}
+                      style={{
+                        width: "100%",
+                        marginTop: 6,
                         padding: "11px",
                         background: "linear-gradient(135deg,#1e4a10,#2e6a18)",
                         border: "none",
@@ -1429,7 +1470,7 @@ export default function App() {
                         transition: "all .2s",
                       }}
                     >
-                      📄 Gerar PDF Técnico
+                      📄 Gerar PDF Comercial
                     </button>
                     <button
                       className="hb"
@@ -1462,7 +1503,17 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab Treinamento */}
+        {/* Aba 2: Plano de Corte Otimizado (CorteSmart) */}
+        {tab === "corte" && (
+          <PlanoCorteView
+            pieces={pieces}
+            clientName={clientName}
+            ambientDesc={ambientDesc}
+            onGoToQuote={() => setTab("quote")}
+          />
+        )}
+
+        {/* Aba 3: Treinamento */}
         {tab === "training" && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
@@ -1706,7 +1757,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab Histórico */}
+        {/* Aba 4: Histórico */}
         {tab === "history" && (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
