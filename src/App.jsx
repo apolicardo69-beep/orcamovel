@@ -131,7 +131,7 @@ export default function App() {
   const [savedBanner, setSavedBanner] = useState(false);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("om_apikey") || "");
   const [showKeyInput, setShowKeyInput] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("om_model") || "anthropic/claude-3.7-sonnet");
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("om_model") || "anthropic/claude-3.5-sonnet");
   const [editingRule, setEditingRule] = useState(null);
   const [showAddRule, setShowAddRule] = useState(false);
   const [newRule, setNewRule] = useState({ category: "Armário/Guarda-roupa", label: "", unit: "m²", price: "", note: "" });
@@ -281,13 +281,20 @@ export default function App() {
     }
   };
 
-  // Chamada de IA
+  // Chamada de IA com Fallback Automático Multi-Modelo
   const requestPageAnalysis = async (systemPrompt, imageDataUrl, instruction, pageLabel, signal) => {
     let maxTokens = 4096;
-    const MAX_ATTEMPTS = 3;
+    const requestedModel = selectedModel || "anthropic/claude-3.5-sonnet";
+    const modelsToTry = [
+      requestedModel,
+      "anthropic/claude-3.5-sonnet",
+      "google/gemini-2.0-flash-001",
+      "openai/gpt-4o",
+    ].filter((m, idx, arr) => arr.indexOf(m) === idx);
+
     let lastErr = null;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    for (const currentModel of modelsToTry) {
       if (signal?.aborted) throw new Error("Análise cancelada pelo usuário.");
 
       const usePersonalKey = !!apiKey;
@@ -306,7 +313,7 @@ export default function App() {
 
       const body = usePersonalKey
         ? JSON.stringify({
-            model: selectedModel,
+            model: currentModel,
             max_tokens: maxTokens,
             temperature: 0.1,
             messages: [
@@ -325,58 +332,49 @@ export default function App() {
             imageDataUrl,
             instruction,
             maxTokens,
-            model: selectedModel,
+            model: currentModel,
           });
 
-      let resp;
       try {
-        resp = await fetch(endpoint, { method: "POST", headers, body, signal });
-      } catch (netErr) {
-        if (netErr.name === "AbortError" || signal?.aborted) {
+        const resp = await fetch(endpoint, { method: "POST", headers, body, signal });
+
+        if (resp.status === 401 || resp.status === 403) {
+          setShowKeyInput(true);
+          throw new Error("Chave da OpenRouter inválida ou sem saldo. Verifique no menu de configurações.");
+        }
+
+        const data = await resp.json().catch(() => ({}));
+
+        if (!resp.ok) {
+          const errMsg = data?.error?.message || `Erro HTTP ${resp.status}`;
+          if (data?.error?.code === "NO_SERVER_KEY" || (!apiKey && resp.status === 400)) {
+            setShowKeyInput(true);
+            throw new Error("Cole sua chave OpenRouter no menu ⚙️ Configurar IA acima.");
+          }
+          lastErr = new Error(errMsg);
+          // Se este modelo falhou (ex: sem endpoints), tenta o próximo modelo da lista
+          continue;
+        }
+
+        const choice = data.choices?.[0];
+        const raw = choice?.message?.content || "";
+        if (!raw) {
+          lastErr = new Error(`Resposta vazia do modelo ${currentModel}`);
+          continue;
+        }
+
+        return extractJSON(raw);
+      } catch (err) {
+        if (err.name === "AbortError" || signal?.aborted) {
           throw new Error("Análise cancelada pelo usuário.");
         }
-        lastErr = new Error(`Falha de conexão em ${pageLabel}: ${netErr.message}`);
-        await new Promise((r) => setTimeout(r, 800 * attempt));
-        continue;
-      }
-
-      if (resp.status === 429 || resp.status >= 500) {
-        const err = await resp.json().catch(() => ({}));
-        lastErr = new Error(err?.error?.message || `Servidor ocupado (${resp.status}) em ${pageLabel}`);
-        await new Promise((r) => setTimeout(r, 1000 * attempt));
-        continue;
-      }
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        if (err?.error?.code === "NO_SERVER_KEY" || !apiKey) {
-          setShowKeyInput(true);
-          throw new Error(
-            "Chave da OpenRouter necessária: Cole sua chave no menu de configurações que abriu na tela."
-          );
+        if (err.message.includes("Chave") || err.message.includes("OpenRouter")) {
+          throw err;
         }
-        throw new Error(err?.error?.message || `Erro HTTP ${resp.status} em ${pageLabel}`);
-      }
-
-      const data = await resp.json();
-      const choice = data.choices?.[0];
-      const raw = choice?.message?.content || "";
-      const truncated = choice?.finish_reason === "length";
-
-      if (truncated) {
-        maxTokens = Math.min(maxTokens * 2, 8192);
-        lastErr = new Error(`Resposta cortada por limite de tokens em ${pageLabel}`);
-        continue;
-      }
-
-      try {
-        return extractJSON(raw);
-      } catch (parseErr) {
-        lastErr = new Error(`JSON inválido em ${pageLabel}: ${parseErr.message}`);
-        continue;
+        lastErr = err;
       }
     }
-    throw lastErr || new Error(`Falha ao analisar ${pageLabel} após ${MAX_ATTEMPTS} tentativas.`);
+    throw lastErr || new Error(`Falha ao analisar ${pageLabel}. Tente com outro modelo ou verifique sua conexão.`);
   };
 
   const stopAnalysis = () => {

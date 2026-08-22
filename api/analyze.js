@@ -47,48 +47,55 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Modelo padrão mais avançado: Claude 3.7 Sonnet
-  const selectedModel = model || "anthropic/claude-3.7-sonnet";
+  // Lista de modelos com fallback automático caso o primeiro esteja indisponível
+  const requestedModel = model || "anthropic/claude-3.5-sonnet";
+  const modelsToTry = [
+    requestedModel,
+    "anthropic/claude-3.5-sonnet",
+    "google/gemini-2.0-flash-001",
+    "openai/gpt-4o",
+  ].filter((m, idx, arr) => arr.indexOf(m) === idx);
 
-  try {
-    const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-        "HTTP-Referer": `https://${req.headers.host || "orcamovel.vercel.app"}`,
-        "X-Title": "OrcaMóvel",
-      },
-      body: JSON.stringify({
-        model: selectedModel,
-        max_tokens: maxTokens || 4096,
-        temperature: 0.1,
-        messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: [
-              { type: "image_url", image_url: { url: imageDataUrl } },
-              { type: "text", text: instruction },
-            ],
-          },
-        ],
-      }),
-    });
+  let lastError = null;
 
-    const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      res.status(upstream.status).json({
-        error: {
-          message: data?.error?.message || `Erro ${upstream.status} da OpenRouter.`,
-          code: data?.error?.code,
+  for (const currentModel of modelsToTry) {
+    try {
+      const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": `https://${req.headers.host || "orcamovel.vercel.app"}`,
+          "X-Title": "OrcaMóvel",
         },
+        body: JSON.stringify({
+          model: currentModel,
+          max_tokens: maxTokens || 4096,
+          temperature: 0.1,
+          messages: [
+            { role: "system", content: systemPrompt },
+            {
+              role: "user",
+              content: [
+                { type: "image_url", image_url: { url: imageDataUrl } },
+                { type: "text", text: instruction },
+              ],
+            },
+          ],
+        }),
       });
-      return;
-    }
 
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    res.status(502).json({ error: { message: "Falha ao contatar a OpenRouter: " + err.message } });
+      const data = await upstream.json().catch(() => ({}));
+      if (upstream.ok && data?.choices?.[0]?.message?.content) {
+        res.status(200).json(data);
+        return;
+      }
+
+      lastError = data?.error?.message || `Erro ${upstream.status} ao chamar ${currentModel}`;
+    } catch (err) {
+      lastError = err.message;
+    }
   }
+
+  res.status(502).json({ error: { message: `Falha ao processar com IA: ${lastError}` } });
 }
