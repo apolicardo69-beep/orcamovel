@@ -531,224 +531,242 @@ export default function App() {
 
   // Gerador de Proposta Comercial Profissional em PDF com Separação por Ambiente
   const generatePDF = async () => {
-    if (!window.jspdf) {
-      await new Promise((res, rej) => {
-        const s = document.createElement("script");
-        s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
-        s.onload = res;
-        s.onerror = rej;
-        document.head.appendChild(s);
-      });
-    }
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-    const q = calcQuote();
-    const PW = 210;
-    const PH = 297;
-    const mg = 14;
-    const col = PW - mg * 2;
-    let y = 16;
-    const gold = [200, 137, 42];
-    const dark = [26, 20, 14];
-    const gr = [110, 100, 90];
-    const bgLight = [248, 244, 238];
-
-    // 1. Cabeçalho de Luxo
-    doc.setFillColor(...gold);
-    doc.rect(0, 0, PW, 24, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(18);
-    doc.setFont("helvetica", "bold");
-    doc.text("OrcaMóvel", mg, 11);
-    doc.setFontSize(7.5);
-    doc.setFont("helvetica", "normal");
-    doc.text("MARCENARIA DE ALTO PADRÃO · PROPOSTA TÉCNICA COMERCIAL", mg, 17);
-    
-    doc.setFontSize(9);
-    doc.setFont("helvetica", "bold");
-    doc.text(`PROPOSTA Nº ${String(Date.now()).slice(-6)}`, PW - mg, 11, { align: "right" });
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-    doc.text(`Emissão: ${new Date().toLocaleDateString("pt-BR")} · Validade: 15 dias`, PW - mg, 17, { align: "right" });
-    y = 32;
-
-    // 2. Bloco do Cliente e Projeto
-    doc.setFillColor(...bgLight);
-    doc.rect(mg, y - 4, col, 22, "F");
-    doc.setDrawColor(220, 205, 185);
-    doc.rect(mg, y - 4, col, 22, "S");
-
-    doc.setTextColor(...dark);
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "bold");
-    doc.text("CLIENTE:", mg + 4, y + 2);
-    doc.setFont("helvetica", "normal");
-    doc.text(clientName || "Cliente", mg + 22, y + 2);
-
-    doc.setFont("helvetica", "bold");
-    doc.text("ENDEREÇO:", mg + 4, y + 8);
-    doc.setFont("helvetica", "normal");
-    doc.text(clientAddress || "Conforme projeto aprovado", mg + 25, y + 8);
-
-    if (architectName) {
-      doc.setFont("helvetica", "bold");
-      doc.text("ARQUITETO(A):", mg + 4, y + 14);
-      doc.setFont("helvetica", "normal");
-      doc.text(architectName, mg + 28, y + 14);
-    } else {
-      doc.setFont("helvetica", "bold");
-      doc.text("AMBIENTES:", mg + 4, y + 14);
-      doc.setFont("helvetica", "normal");
-      doc.text(ambientDesc || "Projeto Geral", mg + 24, y + 14);
-    }
-
-    doc.setFont("helvetica", "bold");
-    doc.text("TELEFONE:", mg + col / 2 + 10, y + 2);
-    doc.setFont("helvetica", "normal");
-    doc.text(clientPhone || "—", mg + col / 2 + 30, y + 2);
-
-    doc.setFont("helvetica", "bold");
-    doc.text("PRAZO:", mg + col / 2 + 10, y + 8);
-    doc.setFont("helvetica", "normal");
-    doc.text(deliveryDeadline, mg + col / 2 + 25, y + 8);
-
-    y += 26;
-
-    // 3. Tabela Agrupada por AMBIENTE
-    const checkPageBreak = (neededHeight) => {
-      if (y + neededHeight > PH - 35) {
-        doc.addPage();
-        y = 18;
+    try {
+      if (!window.jspdf) {
+        await new Promise((res, rej) => {
+          const s = document.createElement("script");
+          s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+          s.onload = res;
+          s.onerror = rej;
+          document.head.appendChild(s);
+        });
       }
-    };
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const q = calcQuote();
+      const PW = 210;
+      const PH = 297;
+      const mg = 14;
+      const col = PW - mg * 2;
+      let y = 16;
+      const gold = [200, 137, 42];
+      const dark = [26, 20, 14];
+      const gr = [110, 100, 90];
+      const bgLight = [248, 244, 238];
 
-    const ambientes = Object.keys(pecasPorAmbiente);
+      // Sanitiza textos para compatibilidade total com jsPDF (remove emojis)
+      const cleanTxt = (t) => {
+        if (!t) return "";
+        return String(t)
+          .replace(/[^\x20-\x7E\xA0-\xFF]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      };
 
-    ambientes.forEach((ambNome, ambIdx) => {
-      const pecasDoAmbiente = pecasPorAmbiente[ambNome];
-      const subtotalAmb = pecasDoAmbiente.reduce((acc, p) => acc + calcLine(p), 0);
-
-      checkPageBreak(25);
-
-      // Header do Ambiente
-      doc.setFillColor(34, 26, 18);
-      doc.rect(mg, y, col, 7.5, "F");
-      doc.setTextColor(232, 170, 64);
-      doc.setFontSize(8.5);
-      doc.setFont("helvetica", "bold");
-      doc.text(`📍 AMBIENTE: ${ambNome.toUpperCase()}`, mg + 3, y + 5);
-      doc.text(
-        `Subtotal: ${fmtBRL(subtotalAmb)}`,
-        PW - mg - 3,
-        y + 5,
-        { align: "right" }
-      );
-      y += 8.5;
-
-      // Cabeçalho da tabela de itens
+      // 1. Cabeçalho de Luxo
       doc.setFillColor(...gold);
-      doc.rect(mg, y, col, 6.5, "F");
+      doc.rect(0, 0, PW, 24, "F");
       doc.setTextColor(255, 255, 255);
+      doc.setFontSize(18);
+      doc.setFont("helvetica", "bold");
+      doc.text("OrcaMovel", mg, 11);
+      doc.setFontSize(7.5);
+      doc.setFont("helvetica", "normal");
+      doc.text("MARCENARIA DE ALTO PADRAO - PROPOSTA TECNICA COMERCIAL", mg, 17);
+      
+      doc.setFontSize(9);
+      doc.setFont("helvetica", "bold");
+      doc.text(`PROPOSTA N ${String(Date.now()).slice(-6)}`, PW - mg, 11, { align: "right" });
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "normal");
+      doc.text(`Emissao: ${new Date().toLocaleDateString("pt-BR")} - Validade: 15 dias`, PW - mg, 17, { align: "right" });
+      y = 32;
+
+      // 2. Bloco do Cliente e Projeto
+      doc.setFillColor(...bgLight);
+      doc.rect(mg, y - 4, col, 22, "F");
+      doc.setDrawColor(220, 205, 185);
+      doc.rect(mg, y - 4, col, 22, "S");
+
+      doc.setTextColor(...dark);
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.text("CLIENTE:", mg + 4, y + 2);
+      doc.setFont("helvetica", "normal");
+      doc.text(cleanTxt(clientName) || "Cliente", mg + 22, y + 2);
+
+      doc.setFont("helvetica", "bold");
+      doc.text("ENDERECO:", mg + 4, y + 8);
+      doc.setFont("helvetica", "normal");
+      doc.text(cleanTxt(clientAddress) || "Conforme projeto aprovado", mg + 25, y + 8);
+
+      if (architectName) {
+        doc.setFont("helvetica", "bold");
+        doc.text("ARQUITETO(A):", mg + 4, y + 14);
+        doc.setFont("helvetica", "normal");
+        doc.text(cleanTxt(architectName), mg + 28, y + 14);
+      } else {
+        doc.setFont("helvetica", "bold");
+        doc.text("AMBIENTES:", mg + 4, y + 14);
+        doc.setFont("helvetica", "normal");
+        doc.text(cleanTxt(ambientDesc) || "Projeto Geral", mg + 24, y + 14);
+      }
+
+      doc.setFont("helvetica", "bold");
+      doc.text("TELEFONE:", mg + col / 2 + 6, y + 2);
+      doc.setFont("helvetica", "normal");
+      doc.text(cleanTxt(clientPhone) || "-", mg + col / 2 + 25, y + 2);
+
+      doc.setFont("helvetica", "bold");
+      doc.text("PRAZO:", mg + col / 2 + 6, y + 8);
+      doc.setFont("helvetica", "normal");
+      doc.text(cleanTxt(deliveryDeadline), mg + col / 2 + 20, y + 8);
+
+      y += 26;
+
+      // 3. Tabela Agrupada por AMBIENTE
+      const checkPageBreak = (neededHeight) => {
+        if (y + neededHeight > PH - 35) {
+          doc.addPage();
+          y = 18;
+        }
+      };
+
+      const ambientes = Object.keys(pecasPorAmbiente);
+
+      ambientes.forEach((ambNome) => {
+        const pecasDoAmbiente = pecasPorAmbiente[ambNome] || [];
+        const subtotalAmb = pecasDoAmbiente.reduce((acc, p) => acc + calcLine(p), 0);
+
+        checkPageBreak(25);
+
+        // Header do Ambiente
+        doc.setFillColor(34, 26, 18);
+        doc.rect(mg, y, col, 7.5, "F");
+        doc.setTextColor(232, 170, 64);
+        doc.setFontSize(8.5);
+        doc.setFont("helvetica", "bold");
+        doc.text(`AMBIENTE: ${cleanTxt(ambNome).toUpperCase()}`, mg + 3, y + 5);
+        doc.text(
+          `Subtotal: ${fmtBRL(subtotalAmb)}`,
+          PW - mg - 3,
+          y + 5,
+          { align: "right" }
+        );
+        y += 8.5;
+
+        // Cabeçalho da tabela de itens
+        doc.setFillColor(...gold);
+        doc.rect(mg, y, col, 6.5, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(7.5);
+        doc.setFont("helvetica", "bold");
+        doc.text("ITEM / DESCRICAO", mg + 2, y + 4.5);
+        doc.text("TIPO", mg + 76, y + 4.5);
+        doc.text("MEDIDAS (m)", mg + 94, y + 4.5);
+        doc.text("QTD", mg + 116, y + 4.5);
+        doc.text("VALOR UNIT.", mg + 128, y + 4.5);
+        doc.text("SUBTOTAL", PW - mg - 2, y + 4.5, { align: "right" });
+        y += 7.5;
+
+        // Linhas do Ambiente
+        pecasDoAmbiente.forEach((l, i) => {
+          checkPageBreak(8);
+
+          if (i % 2 === 0) {
+            doc.setFillColor(252, 248, 242);
+            doc.rect(mg, y - 1, col, 7, "F");
+          }
+          doc.setTextColor(...dark);
+          doc.setFontSize(7.5);
+          doc.setFont("helvetica", "normal");
+          const nomeL = cleanTxt(l.nome);
+          const nome = nomeL.length > 40 ? nomeL.slice(0, 38) + "..." : nomeL;
+          doc.text(nome, mg + 2, y + 4);
+          doc.text(cleanTxt(l.tipo) || "m2", mg + 76, y + 4);
+          const dim =
+            l.tipo === "m²"
+              ? (parseFloat(l.largura) || 0).toFixed(2) + " x " + (parseFloat(l.altura) || 0).toFixed(2)
+              : "-";
+          doc.text(dim, mg + 94, y + 4);
+          doc.text(String(l.quantidade || 1), mg + 118, y + 4);
+          doc.text(fmtBRL(l.precoUnitario || 0), mg + 128, y + 4);
+          doc.setFont("helvetica", "bold");
+          doc.text(fmtBRL(calcLine(l)), PW - mg - 2, y + 4, { align: "right" });
+          doc.setFont("helvetica", "normal");
+          y += 7;
+        });
+
+        y += 4;
+      });
+
+      // 4. Totais e Fechamento Comercial
+      checkPageBreak(50);
+      doc.setDrawColor(...gold);
+      doc.setLineWidth(0.5);
+      doc.line(mg, y, PW - mg, y);
+      y += 6;
+
+      const rowTotal = (lbl, val, bold = false) => {
+        doc.setFont("helvetica", bold ? "bold" : "normal");
+        doc.setFontSize(8.5);
+        doc.setTextColor(...gr);
+        doc.text(lbl, PW - mg - 65, y);
+        doc.setTextColor(...dark);
+        doc.text(fmtBRL(val), PW - mg - 2, y, { align: "right" });
+        y += 6;
+      };
+
+      rowTotal("Subtotal dos Ambientes", q.subtotal);
+      if (q.marginVal > 0) rowTotal(`Margem Comercial (${margin}%)`, q.marginVal);
+
+      y += 2;
+      doc.setFillColor(...gold);
+      doc.rect(PW - mg - 84, y - 4, 84, 11, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.text("TOTAL GERAL", PW - mg - 81, y + 3.5);
+      doc.setFontSize(11);
+      doc.text(fmtBRL(q.total), PW - mg - 2, y + 3.5, { align: "right" });
+      y += 15;
+
+      // 5. Termos Comerciais e Assinatura
+      checkPageBreak(30);
+      doc.setFillColor(...bgLight);
+      doc.rect(mg, y - 2, col, 20, "F");
+      doc.setTextColor(...dark);
       doc.setFontSize(7.5);
       doc.setFont("helvetica", "bold");
-      doc.text("ITEM / DESCRIÇÃO", mg + 2, y + 4.5);
-      doc.text("TIPO", mg + 76, y + 4.5);
-      doc.text("MEDIDAS (m)", mg + 94, y + 4.5);
-      doc.text("QTD", mg + 116, y + 4.5);
-      doc.text("VALOR UNIT.", mg + 128, y + 4.5);
-      doc.text("SUBTOTAL", PW - mg - 2, y + 4.5, { align: "right" });
-      y += 7.5;
+      doc.text("CONDICOES COMERCIAIS & GARANTIA:", mg + 3, y + 3);
+      doc.setFont("helvetica", "normal");
+      doc.text(`- Pagamento: ${cleanTxt(paymentTerms)}`, mg + 3, y + 8);
+      doc.text(`- Prazo de Entrega: ${cleanTxt(deliveryDeadline)}`, mg + 3, y + 12);
+      doc.text("- Garantia: 05 anos contra defeitos de fabricacao em MDF e ferragens.", mg + 3, y + 16);
+      y += 28;
 
-      // Linhas do Ambiente
-      pecasDoAmbiente.forEach((l, i) => {
-        checkPageBreak(8);
+      // Linhas de Assinatura
+      checkPageBreak(20);
+      const signW = 75;
+      doc.setDrawColor(160, 140, 120);
+      doc.line(mg + 10, y, mg + 10 + signW, y);
+      doc.line(PW - mg - signW - 10, y, PW - mg - 10, y);
 
-        if (i % 2 === 0) {
-          doc.setFillColor(252, 248, 242);
-          doc.rect(mg, y - 1, col, 7, "F");
-        }
-        doc.setTextColor(...dark);
-        doc.setFontSize(7.5);
-        doc.setFont("helvetica", "normal");
-        const nome = l.nome.length > 40 ? l.nome.slice(0, 38) + "..." : l.nome;
-        doc.text(nome, mg + 2, y + 4);
-        doc.text(l.tipo || "m²", mg + 76, y + 4);
-        const dim =
-          l.tipo === "m²"
-            ? (parseFloat(l.largura) || 0).toFixed(2) + " × " + (parseFloat(l.altura) || 0).toFixed(2)
-            : "—";
-        doc.text(dim, mg + 94, y + 4);
-        doc.text(String(l.quantidade || 1), mg + 118, y + 4);
-        doc.text(fmtBRL(l.precoUnitario || 0), mg + 128, y + 4);
-        doc.setFont("helvetica", "bold");
-        doc.text(fmtBRL(calcLine(l)), PW - mg - 2, y + 4, { align: "right" });
-        doc.setFont("helvetica", "normal");
-        y += 7;
-      });
-
-      y += 4;
-    });
-
-    // 4. Totais e Fechamento Comercial
-    checkPageBreak(50);
-    doc.setDrawColor(...gold);
-    doc.setLineWidth(0.5);
-    doc.line(mg, y, PW - mg, y);
-    y += 6;
-
-    const rowTotal = (lbl, val, bold = false) => {
-      doc.setFont("helvetica", bold ? "bold" : "normal");
-      doc.setFontSize(8.5);
+      doc.setFontSize(7);
       doc.setTextColor(...gr);
-      doc.text(lbl, PW - mg - 65, y);
-      doc.setTextColor(...dark);
-      doc.text(fmtBRL(val), PW - mg - 2, y, { align: "right" });
-      y += 6;
-    };
+      doc.text("CONTRATADA (Marcenaria)", mg + 10 + signW / 2, y + 4, { align: "center" });
+      doc.text("DE ACORDO - CLIENTE", PW - mg - 10 - signW / 2, y + 4, { align: "center" });
 
-    rowTotal("Subtotal dos Ambientes", q.subtotal);
-    if (q.marginVal > 0) rowTotal(`Margem Comercial (${margin}%)`, q.marginVal);
-
-    y += 2;
-    doc.setFillColor(...gold);
-    doc.rect(PW - mg - 84, y - 4, 84, 11, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.text("TOTAL GERAL", PW - mg - 81, y + 3.5);
-    doc.setFontSize(11);
-    doc.text(fmtBRL(q.total), PW - mg - 2, y + 3.5, { align: "right" });
-    y += 15;
-
-    // 5. Termos Comerciais e Assinatura
-    checkPageBreak(30);
-    doc.setFillColor(...bgLight);
-    doc.rect(mg, y - 2, col, 20, "F");
-    doc.setTextColor(...dark);
-    doc.setFontSize(7.5);
-    doc.setFont("helvetica", "bold");
-    doc.text("CONDIÇÕES COMERCIAIS & GARANTIA:", mg + 3, y + 3);
-    doc.setFont("helvetica", "normal");
-    doc.text(`• Pagamento: ${paymentTerms}`, mg + 3, y + 8);
-    doc.text(`• Prazo de Entrega: ${deliveryDeadline}`, mg + 3, y + 12);
-    doc.text("• Garantia: 05 anos contra defeitos de fabricação em MDF e ferragens.", mg + 3, y + 16);
-    y += 28;
-
-    // Linhas de Assinatura
-    checkPageBreak(20);
-    const signW = 75;
-    doc.setDrawColor(160, 140, 120);
-    doc.line(mg + 10, y, mg + 10 + signW, y);
-    doc.line(PW - mg - signW - 10, y, PW - mg - 10, y);
-
-    doc.setFontSize(7);
-    doc.setTextColor(...gr);
-    doc.text("CONTRATADA (Marcenaria)", mg + 10 + signW / 2, y + 4, { align: "center" });
-    doc.text("DE ACORDO - CLIENTE", PW - mg - 10 - signW / 2, y + 4, { align: "center" });
-
-    // Salvar arquivo
-    const fn = (clientName || "orcamento_marcenaria").replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
-    doc.save(`proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`);
+      // Salvar arquivo
+      const fn = (clientName || "orcamento_marcenaria")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]/g, "_")
+        .toLowerCase();
+      doc.save(`proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`);
+    } catch (pdfErr) {
+      alert("Erro ao gerar PDF: " + pdfErr.message);
+    }
   };
 
   const calcLine = (p) => {
@@ -863,8 +881,13 @@ export default function App() {
         
         .layout-grid {
           display: grid;
-          grid-template-columns: 1fr 340px;
+          grid-template-columns: minmax(0, 1fr) 340px;
           gap: 20px;
+          align-items: start;
+        }
+        .layout-grid > div {
+          min-width: 0;
+          max-width: 100%;
         }
         .header-wrap {
           display: flex;
@@ -875,7 +898,7 @@ export default function App() {
         }
         .client-inputs-grid {
           display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
           gap: 10px;
           margin-bottom: 14px;
         }
@@ -919,6 +942,25 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              onClick={() => setShowClientModal(true)}
+              style={{
+                background: "rgba(200,137,42,.15)",
+                border: "1px solid rgba(200,137,42,.35)",
+                borderRadius: 8,
+                color: "#e8aa40",
+                padding: "7px 12px",
+                fontSize: 12,
+                cursor: "pointer",
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+            >
+              📑 Dados da Proposta
+            </button>
+
             <div style={{ position: "relative" }}>
               <button
                 onClick={() => setShowKeyInput((v) => !v)}
@@ -950,10 +992,10 @@ export default function App() {
                     border: "1px solid #c8892a",
                     borderRadius: 14,
                     padding: 20,
-                    zIndex: 999,
+                    zIndex: 99999,
                     width: "92%",
                     maxWidth: 380,
-                    boxShadow: "0 16px 48px rgba(0,0,0,.85)",
+                    boxShadow: "0 16px 48px rgba(0,0,0,.9)",
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -1103,7 +1145,7 @@ export default function App() {
             color: "#8aca58",
             fontWeight: 600,
             fontSize: 14,
-            zIndex: 999,
+            zIndex: 99999,
             boxShadow: "0 8px 24px rgba(0,0,0,.6)",
           }}
         >
@@ -1120,12 +1162,13 @@ export default function App() {
             left: 0,
             right: 0,
             bottom: 0,
-            background: "rgba(0,0,0,.75)",
+            background: "rgba(0,0,0,.85)",
+            backdropFilter: "blur(6px)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             padding: 16,
-            zIndex: 9999,
+            zIndex: 99999,
           }}
         >
           <div
@@ -1153,7 +1196,7 @@ export default function App() {
               </div>
               <div>
                 <label style={{ display: "block", fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 4 }}>Endereço da Obra</label>
-                <input value={clientAddress} onChange={(e) => setClientAddress(e.target.value)} placeholder="Ex: Av. Paulista, 1000 — Apto 142" style={IS} />
+                <input value={clientAddress} onChange={(e) => setClientAddress(e.target.value)} placeholder="Ex: Alphaville — Alameda dos Ipês, 150" style={IS} />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <div>
@@ -1564,7 +1607,7 @@ export default function App() {
 
               {/* Seletor de Filtro de Ambiente */}
               {ambientesDisponiveis.length > 1 && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, overflowX: "auto", paddingBottom: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, overflowX: "auto", paddingBottom: 6, maxWidth: "100%", width: "100%", flexWrap: "nowrap" }}>
                   <span style={{ fontSize: 11, color: "#8a6a40", textTransform: "uppercase", fontWeight: 700, whiteSpace: "nowrap" }}>
                     Filtrar por:
                   </span>
