@@ -1,6 +1,8 @@
 import { useState, useRef, useMemo } from "react";
 import { jsPDF } from "jspdf";
+import { saveAs } from "file-saver";
 import PlanoCorteView from "./components/PlanoCorteView";
+import BancoConstrutivoView from "./components/BancoConstrutivoView";
 
 // Limiar para alertar o usuário sobre PDFs com muitas páginas
 const LARGE_PDF_PAGE_THRESHOLD = 5;
@@ -24,6 +26,17 @@ const fmtBRL = (v) =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+
+// Lista compacta (texto, barato em tokens) das peças já extraídas em páginas
+// anteriores do MESMO projeto — passada para a IA a cada nova página para que
+// ela reconheça quando a página atual é só outra vista (interna/explodida/com
+// portas abertas) de um móvel que já foi contado, em vez de precificá-lo de novo.
+const resumoPecasParaContexto = (piecesList) => {
+  return (piecesList || [])
+    .filter((p) => p.tipo !== "%")
+    .map((p) => `- [${p.ambiente || "?"}] ${p.nome} (${p.tipo || "m²"}${p.largura ? `, ${p.largura}×${p.altura}m` : ""})`)
+    .join("\n");
+};
 
 const DEFAULT_RULES = [
   { id: 1, category: "Armário/Guarda-roupa", label: "Corpo do armário completo (inclui portas MDF)", price: 1250, unit: "m²", note: "Altura × Largura. Preço JÁ INCLUI portas de correr em MDF. Padrão interno MDF Branco Texturizado. Corrediça RO45 Rometal." },
@@ -66,7 +79,8 @@ const CAT_COLORS = {
 };
 
 const buildSystemPrompt = (rules, examples) => {
-  const ruleLines = rules.map((r) => `- ${r.label}: R$${r.price}/${r.unit}. ${r.note}`).join("\n");
+  const categorias = [...new Set(rules.map((r) => r.category))];
+  const ruleLines = rules.map((r) => `- [${r.category}] ${r.label}: R$${r.price}/${r.unit}. ${r.note}`).join("\n");
   const exLines = examples
     .map(
       (ex) =>
@@ -86,6 +100,9 @@ ${ruleLines}
 - Armários em geral: Altura × Largura = m², depois × preço/m²
 - Painéis em L, U, C: desmembrar em retângulos separados para o cálculo exato.
 - Se a página/imagem não contiver cotas de marcenaria (capa, texto descritivo, render sem medidas), retorne "pecas": [].
+- **EVITAR DUPLICIDADE ENTRE PÁGINAS:** É muito comum o projeto mostrar o MESMO móvel mais de uma vez em páginas diferentes — vista frontal, vista interna/explodida, corte, ou com as portas abertas revelando gavetas/prateleiras internas. Isso é A MESMA PEÇA, não uma peça nova. Quando a mensagem do usuário incluir uma lista de "peças já identificadas em páginas anteriores", compare o ambiente e as dimensões do que você está vendo com essa lista: se for o mesmo móvel (mesmo ambiente, largura/altura muito próximas), NÃO crie um item novo para ele — gere item em "pecas" apenas para móveis que ainda não estão na lista.
+- **CATEGORIA:** Todo item em "pecas" DEVE ter o campo "categoria" preenchido com EXATAMENTE um destes valores (usados também no plano de corte): ${categorias.join(", ")}.
+- **PROFUNDIDADE:** Quando o projeto tiver vista lateral, corte ou cota de profundidade visível, extraia também "profundidade" (em metros, ex: 0.56). Isso é usado para gerar o plano de corte físico das peças (laterais, tampo, base, fundo). Se a profundidade não estiver visível em nenhuma vista, retorne "profundidade": 0 — o sistema usa um valor padrão configurável nesse caso e avisa o marceneiro que foi assumido.
 
 ## EXEMPLOS REAIS:
 ${exLines}
@@ -101,10 +118,12 @@ ${exLines}
   "pecas": [
     {
       "ambiente": "Nome do Ambiente (ex: Sala de Estar)",
+      "categoria": "Uma das categorias listadas acima (ex: Armário/Guarda-roupa)",
       "nome": "Descrição da peça",
       "tipo": "m²",
       "largura": 2.20,
       "altura": 2.60,
+      "profundidade": 0.56,
       "quantidade": 1,
       "precoUnitario": 1250,
       "subtotal": 7150,
@@ -168,6 +187,42 @@ export default function App() {
       if (p.ambiente && p.ambiente.trim()) setAmb.add(p.ambiente.trim());
     });
     return Array.from(setAmb);
+  }, [pieces]);
+
+  // Rede de segurança contra duplicatas entre páginas (ex.: vista frontal +
+  // vista interna do MESMO armário lidas como dois móveis). Isso NUNCA remove
+  // nada sozinho — só sinaliza pares suspeitos (mesmo ambiente, tipo e
+  // dimensões muito próximas) para o marceneiro revisar e decidir, já que
+  // peças repetidas de propósito também existem (ex.: duas mesas de
+  // cabeceira do mesmo tamanho não são um bug).
+  const possiveisDuplicatas = useMemo(() => {
+    const perto = (a, b) => {
+      const av = parseFloat(a) || 0;
+      const bv = parseFloat(b) || 0;
+      if (av <= 0 || bv <= 0) return false;
+      return Math.abs(av - bv) <= Math.max(0.02, 0.03 * Math.max(av, bv));
+    };
+    const porAmbiente = {};
+    pieces.forEach((p) => {
+      if (p.tipo !== "m²" && p.tipo !== "ml") return; // preço fixo por "un" costuma repetir de propósito
+      const amb = p.ambiente || "?";
+      (porAmbiente[amb] = porAmbiente[amb] || []).push(p);
+    });
+    const pares = [];
+    Object.values(porAmbiente).forEach((lista) => {
+      for (let i = 0; i < lista.length; i++) {
+        for (let j = i + 1; j < lista.length; j++) {
+          const a = lista[i], b = lista[j];
+          if (a.tipo !== b.tipo) continue;
+          const bate =
+            a.tipo === "m²"
+              ? perto(a.largura, b.largura) && perto(a.altura, b.altura)
+              : perto(a.quantidade, b.quantidade);
+          if (bate) pares.push([a, b]);
+        }
+      }
+    });
+    return pares;
   }, [pieces]);
 
   // Peças agrupadas por Ambiente
@@ -459,10 +514,14 @@ export default function App() {
       setAnalyzingProgress({ current: i + 1, total, pageNum });
 
       const pageLabel = total > 1 ? `página ${pageNum}/${allImages.length}` : "o projeto";
-      const instruction =
+      const contextoJaExtraido = resumoPecasParaContexto(newPieces);
+      const instrucaoBase =
         total > 1
           ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Extraia móveis, cotas e medidas desta página. Identifique o ambiente específico de cada móvel no campo 'ambiente' (ex: 'Sala de Estar', 'Cozinha', 'Suíte', etc.). Se houver carimbo/selo com nome do cliente, endereço e arquiteto, extraia também. Retorne SOMENTE o JSON.`
           : `Analise este projeto técnico de móveis planejados. Extraia peças, cotas e separe por ambiente no campo 'ambiente'. Se houver carimbo, extraia nome do cliente, endereço e arquiteto. Retorne SOMENTE o JSON.`;
+      const instruction = contextoJaExtraido
+        ? `${instrucaoBase}\n\nPEÇAS JÁ IDENTIFICADAS EM PÁGINAS ANTERIORES DESTE MESMO PROJETO (NÃO DUPLICAR):\n${contextoJaExtraido}\n\nSe esta página mostrar o MESMO móvel listado acima em outro ângulo, vista interna/explodida, corte, ou com portas abertas revelando gavetas/prateleiras (mesmo ambiente + dimensões parecidas às já listadas), NÃO crie um item novo para ele — retorne em "pecas" só os móveis que ainda NÃO aparecem na lista acima.`
+        : instrucaoBase;
 
       try {
         const parsed = await requestPageAnalysis(systemPrompt, img, instruction, pageLabel, abortController.signal);
@@ -478,6 +537,7 @@ export default function App() {
           const formatted = parsed.pecas.map((p) => {
             const larg = parseFloat(p.largura) || 0;
             const alt = parseFloat(p.altura) || 0;
+            const prof = parseFloat(p.profundidade) || 0;
             const qtd = parseFloat(p.quantidade) || 1;
             const preco = parseFloat(p.precoUnitario) || (p.tipo === "ml" ? 1250 : 1250);
             const sub = p.tipo === "m²" ? larg * alt * qtd * preco : qtd * preco;
@@ -486,8 +546,10 @@ export default function App() {
               _id: nextId++,
               _pagina: pageNum,
               ambiente: p.ambiente || pageAmbiente,
+              categoria: p.categoria || "",
               largura: larg,
               altura: alt,
+              profundidade: prof,
               quantidade: qtd,
               precoUnitario: preco,
               subtotal: sub || p.subtotal || 0,
@@ -758,22 +820,9 @@ export default function App() {
         .toLowerCase();
       const safeFileName = `proposta_${fn}_${new Date().toLocaleDateString("pt-BR").replace(/\//g, "-")}.pdf`;
 
-      // Exporta como Blob application/pdf e força download
+      // Usa file-saver para download confiável com nome e extensão .pdf
       const pdfBlob = doc.output("blob");
-      const safeBlob = new Blob([pdfBlob], { type: "application/pdf" });
-      const blobUrl = URL.createObjectURL(safeBlob);
-
-      const link = document.createElement("a");
-      link.style.display = "none";
-      link.href = blobUrl;
-      link.setAttribute("download", safeFileName);
-      document.body.appendChild(link);
-      link.click();
-
-      setTimeout(() => {
-        if (link.parentNode) link.parentNode.removeChild(link);
-        URL.revokeObjectURL(blobUrl);
-      }, 3000);
+      saveAs(pdfBlob, safeFileName);
     } catch (pdfErr) {
       alert("Erro ao gerar PDF: " + pdfErr.message);
     }
@@ -803,10 +852,12 @@ export default function App() {
       {
         _id: Date.now(),
         ambiente: ambDefault || (ambientesDisponiveis[0] || "Sala de Estar"),
+        categoria: catGroups[0] || "",
         nome: "Nova Peça",
         tipo: "m²",
         largura: 1.0,
         altura: 1.0,
+        profundidade: 0,
         quantidade: 1,
         precoUnitario: 1250,
         subtotal: 1250,
@@ -1111,6 +1162,7 @@ export default function App() {
         {[
           { id: "quote", icon: "📐", label: "Orçamento" },
           { id: "corte", icon: "🪚", label: `Plano de Corte${pieces.length > 0 ? ` (${pieces.length})` : ""}` },
+          { id: "construction", icon: "🧱", label: "Banco Construtivo" },
           { id: "training", icon: "🧠", label: "Treinar IA" },
           { id: "history", icon: "📋", label: "Histórico" },
         ].map((t) => (
@@ -1615,6 +1667,40 @@ export default function App() {
                 </div>
               )}
 
+              {/* Aviso de Possíveis Duplicatas (ex.: vista frontal + vista interna do mesmo móvel) */}
+              {possiveisDuplicatas.length > 0 && (
+                <div style={{ background: "#1a1000", border: "1px solid #c86a2a", borderRadius: 10, padding: "12px 16px", marginBottom: 14 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontSize: 18 }}>⚠️</span>
+                    <span style={{ color: "#e89a40", fontWeight: 700, fontSize: 13 }}>
+                      {possiveisDuplicatas.length} possível(is) duplicata(s) — confira antes de fechar o orçamento
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#a07040", marginBottom: 10, lineHeight: 1.6 }}>
+                    Peças no mesmo ambiente com dimensões quase idênticas — geralmente é o mesmo móvel lido duas vezes (ex.: vista frontal + vista interna com portas abertas). Pode ser proposital (ex.: duas peças simétricas), então revise antes de remover.
+                  </div>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {possiveisDuplicatas.map(([a, b], i) => (
+                      <div key={i} style={{ background: "#150d05", border: "1px solid #3a2610", borderRadius: 8, padding: "8px 12px", display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ fontSize: 12, color: "#d0a060" }}>
+                          <strong style={{ color: "#e0b070" }}>[{a.ambiente}]</strong> {a.nome} ({a.tipo === "m²" ? `${a.largura}×${a.altura}m` : `${a.quantidade}ml`}, {fmtBRL(a.subtotal)})
+                          {" vs. "}
+                          {b.nome} ({b.tipo === "m²" ? `${b.largura}×${b.altura}m` : `${b.quantidade}ml`}, {fmtBRL(b.subtotal)})
+                        </div>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button onClick={() => delPiece(a._id)} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.3)", borderRadius: 6, color: "#c08080", padding: "4px 10px", fontSize: 11, cursor: "pointer" }}>
+                            Remover 1ª
+                          </button>
+                          <button onClick={() => delPiece(b._id)} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.3)", borderRadius: 6, color: "#c08080", padding: "4px 10px", fontSize: 11, cursor: "pointer" }}>
+                            Remover 2ª
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Seletor de Filtro de Ambiente */}
               {ambientesDisponiveis.length > 1 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, overflowX: "auto", paddingBottom: 6, maxWidth: "100%", width: "100%", flexWrap: "nowrap" }}>
@@ -1763,7 +1849,7 @@ export default function App() {
                           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
                             <thead>
                               <tr style={{ background: "#150f07" }}>
-                                {["Peça", "Tipo", "Larg (m)", "Alt (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
+                                {["Peça", "Categoria", "Tipo", "Larg (m)", "Alt (m)", "Prof (m)", "Qtd", "R$/un", "Subtotal", ""].map((h) => (
                                   <th
                                     key={h}
                                     style={{
@@ -1797,6 +1883,14 @@ export default function App() {
                                     </div>
                                   </td>
                                   <td style={{ padding: "6px 4px" }}>
+                                    <select value={p.categoria || ""} onChange={(e) => updPiece(p._id, "categoria", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 130 }}>
+                                      <option value="">— sem categoria —</option>
+                                      {catGroups.map((c) => (
+                                        <option key={c} value={c}>{c}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
                                     <select value={p.tipo || "m²"} onChange={(e) => updPiece(p._id, "tipo", e.target.value)} style={{ ...IS, fontSize: 11, padding: "4px 5px", width: 72 }}>
                                       {["m²", "ml", "unidade", "%"].map((t) => (
                                         <option key={t}>{t}</option>
@@ -1808,6 +1902,9 @@ export default function App() {
                                   </td>
                                   <td style={{ padding: "6px 4px" }}>
                                     <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
+                                  </td>
+                                  <td style={{ padding: "6px 4px" }}>
+                                    <input type="number" value={p.profundidade || ""} onChange={(e) => updPiece(p._id, "profundidade", e.target.value)} step="0.01" placeholder="—" title="Profundidade — usada no plano de corte" style={{ ...NS, width: 56, padding: "4px 5px", fontSize: 12 }} />
                                   </td>
                                   <td style={{ padding: "6px 4px" }}>
                                     <input type="number" value={p.quantidade} onChange={(e) => updPiece(p._id, "quantidade", e.target.value)} min={1} style={{ ...NS, width: 44, padding: "4px 5px", fontSize: 12, color: "#f0e0c8" }} />
@@ -1857,7 +1954,16 @@ export default function App() {
                                 </button>
                               </div>
 
-                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+                              <div style={{ marginBottom: 8 }}>
+                                <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block", marginBottom: 3 }}>Categoria (p/ plano de corte)</span>
+                                <select value={p.categoria || ""} onChange={(e) => updPiece(p._id, "categoria", e.target.value)} style={{ ...IS, padding: "5px 6px", fontSize: 12 }}>
+                                  <option value="">— sem categoria —</option>
+                                  {catGroups.map((c) => (
+                                    <option key={c} value={c}>{c}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
                                 <div>
                                   <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Larg (m)</span>
                                   <input type="number" value={p.largura || ""} onChange={(e) => updPiece(p._id, "largura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
@@ -1865,6 +1971,10 @@ export default function App() {
                                 <div>
                                   <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Alt (m)</span>
                                   <input type="number" value={p.altura || ""} onChange={(e) => updPiece(p._id, "altura", e.target.value)} step="0.01" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
+                                </div>
+                                <div>
+                                  <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Prof (m)</span>
+                                  <input type="number" value={p.profundidade || ""} onChange={(e) => updPiece(p._id, "profundidade", e.target.value)} step="0.01" placeholder="—" style={{ ...NS, padding: "5px 6px", fontSize: 13 }} />
                                 </div>
                                 <div>
                                   <span style={{ fontSize: 9, color: "#7a6040", textTransform: "uppercase", display: "block" }}>Qtd</span>
@@ -2069,6 +2179,9 @@ export default function App() {
             onGoToQuote={() => setTab("quote")}
           />
         )}
+
+        {/* Banco Construtivo V1 — laboratório de testes */}
+        {tab === "construction" && <BancoConstrutivoView />}
 
         {/* Aba 3: Treinamento */}
         {tab === "training" && (

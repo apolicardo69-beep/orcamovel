@@ -25,46 +25,20 @@ export const CORES_PECAS = [
  * para o formato esperado pelo motor de corte (em milímetros).
  */
 export function normalizarPecasParaCorte(pecasOrca) {
-  return pecasOrca
-    .filter((p) => {
-      const l = parseFloat(p.largura) || 0;
-      const a = parseFloat(p.altura) || 0;
-      const qtd = parseInt(p.quantidade, 10) || 1;
-      return (l > 0 || a > 0) && qtd > 0;
-    })
-    .map((p, idx) => {
-      let larg = parseFloat(p.largura) || 0;
-      let alt = parseFloat(p.altura) || 0;
-
-      // Se veio em metros (ex: 2.20 ou 0.60), converte para mm (* 1000)
-      if (larg > 0 && larg < 10) larg = Math.round(larg * 1000);
-      if (alt > 0 && alt < 10) alt = Math.round(alt * 1000);
-
-      // Se ainda estiver pequeno (ex: 60 cm), converte para mm (* 10)
-      if (larg >= 10 && larg <= 100) larg = Math.round(larg * 10);
-      if (alt >= 10 && alt <= 100) alt = Math.round(alt * 10);
-
-      // Caso uma dimensão seja 0 (ex: peça linear), define uma largura útil padrão de 150mm
-      if (larg === 0 && alt > 0) larg = 150;
-      if (alt === 0 && larg > 0) alt = 150;
-
-      const cor = CORES_PECAS[idx % CORES_PECAS.length];
-      const codigo = `P${String(idx + 1).padStart(2, "0")}`;
-
-      return {
-        id: p._id || p.id || String(idx + 1),
-        codigo,
-        nome: p.nome || `Peça ${idx + 1}`,
-        largura_mm: larg,
-        comprimento_mm: alt,
-        quantidade: parseInt(p.quantidade, 10) || 1,
-        tipo: p.tipo || "m²",
-        rotacao_permitida: true,
-        veio: "qualquer",
-        cor,
-        _origem: p,
-      };
-    });
+  const invalidas = [];
+  const normalizadas = (pecasOrca || []).flatMap((p, idx) => {
+    const production = Number.isFinite(Number(p.comprimento_mm)) && Number.isFinite(Number(p.largura_mm));
+    let larg, alt;
+    if (production) { larg = Math.round(Number(p.largura_mm)); alt = Math.round(Number(p.comprimento_mm)); }
+    else if (p.unidade === 'm') { larg = Math.round(Number(p.largura) * 1000); alt = Math.round(Number(p.altura) * 1000); }
+    else if (p.unidade === 'mm') { larg = Math.round(Number(p.largura)); alt = Math.round(Number(p.altura)); }
+    else { invalidas.push({peca:p,motivo:'Unidade não declarada. O motor V2 não adivinha unidades.'}); return []; }
+    const qtd = parseInt(p.quantidade,10) || 1;
+    if (!(larg>0 && alt>0 && qtd>0)) { invalidas.push({peca:p,motivo:'Dimensão ou quantidade inválida.'}); return []; }
+    return [{ id:p._id||p.id||String(idx+1), codigo:`P${String(idx+1).padStart(2,'0')}`, nome:p.nome||`Peça ${idx+1}`, largura_mm:larg, comprimento_mm:alt, quantidade:qtd, tipo:p.tipo||'m²', espessura_mm:p.espessura_mm, material_id:p.material_id||'LEGACY_NAO_CLASSIFICADO', rotacao_permitida:p.rotacao_permitida!==false, veio:p.veio||'qualquer', cor:CORES_PECAS[idx%CORES_PECAS.length], _origem:p }];
+  });
+  normalizadas.invalidas = invalidas;
+  return normalizadas;
 }
 
 /**
@@ -100,6 +74,7 @@ export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
 
   // 3. Bin packing com Guillotine Split
   const chapas = [];
+  const naoPosicionadas = [];
 
   for (const inst of instancias) {
     const colocado = tentarColocar(
@@ -124,8 +99,7 @@ export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
         pecas: [],
         espacosLivres: [{ x: margem, y: margem, largura: utilL, altura: utilA }],
       };
-      chapas.push(novaChapa);
-      tentarColocar(
+      const colocadoNaNova = tentarColocar(
         inst.peca,
         inst.instancia,
         [novaChapa],
@@ -136,6 +110,20 @@ export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
         utilA,
         margem
       );
+
+      if (colocadoNaNova) {
+        chapas.push(novaChapa);
+      } else {
+        // A peça não cabe nem numa chapa vazia (maior que a chapa em qualquer
+        // rotação permitida) — antes isso era descartado silenciosamente e uma
+        // chapa fantasma vazia ficava na lista. Agora reportamos explicitamente
+        // em vez de fingir que a peça foi cortada.
+        naoPosicionadas.push({
+          peca: inst.peca,
+          instancia: inst.instancia,
+          motivo: `Peça "${inst.peca.nome}" (${inst.peca.largura_mm}×${inst.peca.comprimento_mm}mm) excede o tamanho útil da chapa (${utilL}×${utilA}mm) mesmo rotacionada — não foi posicionada em nenhuma chapa.`,
+        });
+      }
     }
   }
 
@@ -177,7 +165,8 @@ export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
   return {
     chapas: chapasOtimizadas,
     total_chapas: chapas.length,
-    total_pecas_posicionadas: instancias.length,
+    total_pecas_posicionadas: instancias.length - naoPosicionadas.length,
+    pecas_nao_posicionadas: naoPosicionadas,
     aproveitamento_medio_pct: aprovMedio,
     area_usada_m2: Number((totalAreaUsadaMm2 / 1_000_000).toFixed(2)),
     area_desperdicada_m2: Number((areaDesperdicadaMm2 / 1_000_000).toFixed(2)),
