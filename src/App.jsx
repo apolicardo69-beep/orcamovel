@@ -1,8 +1,10 @@
+import {anexarComplementos,possiveisDuplicatas as detectarDuplicatas} from './engine/interpretacao.js';
 import { useState, useRef, useMemo } from "react";
 import { jsPDF } from "jspdf";
 import { saveAs } from "file-saver";
 import PlanoCorteView from "./components/PlanoCorteView";
 import BancoConstrutivoView from "./components/BancoConstrutivoView";
+import OrcamentoManual from "./components/OrcamentoManual";
 
 // Limiar para alertar o usuário sobre PDFs com muitas páginas
 const LARGE_PDF_PAGE_THRESHOLD = 5;
@@ -34,7 +36,7 @@ const fmtBRL = (v) =>
 const resumoPecasParaContexto = (piecesList) => {
   return (piecesList || [])
     .filter((p) => p.tipo !== "%")
-    .map((p) => `- [${p.ambiente || "?"}] ${p.nome} (${p.tipo || "m²"}${p.largura ? `, ${p.largura}×${p.altura}m` : ""})`)
+    .map((p) => `- [${p.ambiente || "?"}] [${p.codigo_modulo || "sem código"}] ${p.nome} (${p.tipo || "m²"}${p.largura ? `, ${p.largura}×${p.altura}m` : ""})`)
     .join("\n");
 };
 
@@ -100,9 +102,20 @@ ${ruleLines}
 - Armários em geral: Altura × Largura = m², depois × preço/m²
 - Painéis em L, U, C: desmembrar em retângulos separados para o cálculo exato.
 - Se a página/imagem não contiver cotas de marcenaria (capa, texto descritivo, render sem medidas), retorne "pecas": [].
-- **EVITAR DUPLICIDADE ENTRE PÁGINAS:** É muito comum o projeto mostrar o MESMO móvel mais de uma vez em páginas diferentes — vista frontal, vista interna/explodida, corte, ou com as portas abertas revelando gavetas/prateleiras internas. Isso é A MESMA PEÇA, não uma peça nova. Quando a mensagem do usuário incluir uma lista de "peças já identificadas em páginas anteriores", compare o ambiente e as dimensões do que você está vendo com essa lista: se for o mesmo móvel (mesmo ambiente, largura/altura muito próximas), NÃO crie um item novo para ele — gere item em "pecas" apenas para móveis que ainda não estão na lista.
+- **EVITAR DUPLICIDADE ENTRE PÁGINAS:** É muito comum o projeto mostrar o MESMO móvel mais de uma vez em páginas diferentes — vista frontal, vista interna/explodida, corte, ou com as portas abertas revelando gavetas/prateleiras internas. Isso é A MESMA PEÇA, não uma peça nova. Quando a mensagem do usuário incluir uma lista de "peças já identificadas em páginas anteriores", compare o ambiente e as dimensões do que você está vendo com essa lista: se o código e o ambiente identificarem o mesmo móvel (dimensões semelhantes, sozinhas, não comprovam identidade), NÃO crie um item novo para ele — gere item em "pecas" apenas para móveis que ainda não estão na lista.
 - **CATEGORIA:** Todo item em "pecas" DEVE ter o campo "categoria" preenchido com EXATAMENTE um destes valores (usados também no plano de corte): ${categorias.join(", ")}.
 - **PROFUNDIDADE:** Quando o projeto tiver vista lateral, corte ou cota de profundidade visível, extraia também "profundidade" (em metros, ex: 0.56). Isso é usado para gerar o plano de corte físico das peças (laterais, tampo, base, fundo). Se a profundidade não estiver visível em nenhuma vista, retorne "profundidade": 0 — o sistema usa um valor padrão configurável nesse caso e avisa o marceneiro que foi assumido.
+
+## IDENTIFICAÇÃO CONSTRUTIVA:
+- Não utilize cotas do cômodo, parede completa ou layout como dimensões de um móvel. Identifique os limites físicos do módulo e sua cota na vista detalhada; se não for possível, deixe a dimensão ausente.
+- Móveis com códigos diferentes são itens diferentes, mesmo quando têm medidas iguais. Não omita M321 por existir M322. Um home e uma prateleira não são duplicatas por terem a mesma quantidade comercial.
+- Complementos de vistas não são erros. Informe divergencias_cotas somente quando existirem cotas realmente conflitantes. Identifique referencia_dimensoes como TOTAL_MODULO ou PARTE conforme a cota; não compare a medida de um vão com a dimensão total do armário.
+- Preserve codigo_modulo exatamente como identificado na vista (ex.: M304); não invente código. Se o carimbo divergir da vista, registre divergencias_cotas. Identifique o ambiente.
+- Separe tipo_construtivo em PAINEL_LISO, PAINEL_FRISADO, PAINEL_RIPADO, PAINEL_COM_PORTA ou CORPO. Painel para TV não é automaticamente um armário. Frisos não significam ripas aplicadas.
+- Registre recortes como objetos com descrição, posição e cotas explícitas em mm; medidas desconhecidas ficam null. Nunca descarte recorte de janela. Não converta espessura total do conjunto em espessura de chapa.
+- Largura, altura e profundidade comerciais continuam em metros. Parâmetros de ripas em mm: ripa_largura_mm, ripa_espacamento_mm, ripa_espessura_mm, base_espessura_mm. ripado_tem_base: true, false ou null. Não aplique padrão 50/20 quando faltarem cotas.
+- Vistas adicionais do mesmo módulo não geram outra linha de orçamento. Envie os novos detalhes em complementos_modulos, com codigo_modulo, ambiente, cotas comerciais em metros, recortes e observacao. O sistema guarda isso para revisão.
+- Registre divergencias_cotas como lista de textos quando as medidas das vistas discordarem.
 
 ## EXEMPLOS REAIS:
 ${exLines}
@@ -114,12 +127,17 @@ ${exLines}
   "arquiteto": "Nome do arquiteto/empresa (se visível)",
   "ambiente": "Ambiente principal desta página",
   "descricao": "Resumo dos móveis identificados",
+  "complementos_modulos": [],
   "formasCompostas": ["Peças em L/U/C detectadas"],
   "pecas": [
     {
       "ambiente": "Nome do Ambiente (ex: Sala de Estar)",
       "categoria": "Uma das categorias listadas acima (ex: Armário/Guarda-roupa)",
       "nome": "Descrição da peça",
+      "codigo_modulo": null,
+      "tipo_construtivo": "CORPO",
+      "recortes": [],
+      "divergencias_cotas": [],
       "tipo": "m²",
       "largura": 2.20,
       "altura": 2.60,
@@ -147,6 +165,7 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState(null);
   const [formasCompostas, setFormasCompostas] = useState([]);
   const [pieces, setPieces] = useState([]);
+  const [complementosPendentes,setComplementosPendentes]=useState([]);
   
   // Informações do Cliente & Proposta Comercial
   const [clientName, setClientName] = useState("");
@@ -195,35 +214,7 @@ export default function App() {
   // dimensões muito próximas) para o marceneiro revisar e decidir, já que
   // peças repetidas de propósito também existem (ex.: duas mesas de
   // cabeceira do mesmo tamanho não são um bug).
-  const possiveisDuplicatas = useMemo(() => {
-    const perto = (a, b) => {
-      const av = parseFloat(a) || 0;
-      const bv = parseFloat(b) || 0;
-      if (av <= 0 || bv <= 0) return false;
-      return Math.abs(av - bv) <= Math.max(0.02, 0.03 * Math.max(av, bv));
-    };
-    const porAmbiente = {};
-    pieces.forEach((p) => {
-      if (p.tipo !== "m²" && p.tipo !== "ml") return; // preço fixo por "un" costuma repetir de propósito
-      const amb = p.ambiente || "?";
-      (porAmbiente[amb] = porAmbiente[amb] || []).push(p);
-    });
-    const pares = [];
-    Object.values(porAmbiente).forEach((lista) => {
-      for (let i = 0; i < lista.length; i++) {
-        for (let j = i + 1; j < lista.length; j++) {
-          const a = lista[i], b = lista[j];
-          if (a.tipo !== b.tipo) continue;
-          const bate =
-            a.tipo === "m²"
-              ? perto(a.largura, b.largura) && perto(a.altura, b.altura)
-              : perto(a.quantidade, b.quantidade);
-          if (bate) pares.push([a, b]);
-        }
-      }
-    });
-    return pares;
-  }, [pieces]);
+  const possiveisDuplicatas = useMemo(() => detectarDuplicatas(pieces), [pieces]);
 
   // Peças agrupadas por Ambiente
   const pecasPorAmbiente = useMemo(() => {
@@ -293,7 +284,7 @@ export default function App() {
   const handleFile = (file) => {
     if (!file) return;
     setAnalysisError(null);
-    setPieces([]);
+    setPieces([]); setComplementosPendentes([]);
     setSelectedPageIndex(0);
 
     if (file.type === "application/pdf") {
@@ -306,6 +297,7 @@ export default function App() {
         } catch (err) {
           setAnalysisError("Erro ao processar PDF: " + err.message);
           setUploadedFile(null);
+    setComplementosPendentes([]);
         }
       };
       reader.readAsArrayBuffer(file);
@@ -501,7 +493,8 @@ export default function App() {
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
-    const newPieces = [...(onlyCurrentPage ? pieces.filter(p => p._pagina !== selectedPageIndex + 1) : [])];
+    const newPieces = structuredClone(onlyCurrentPage ? pieces.filter(p => p._pagina !== selectedPageIndex + 1) : []);
+    const complementosNaoVinculados=[];
     const allFormas = [...formasCompostas];
     const ambientParts = ambientDesc ? [ambientDesc] : [];
     const failedPages = [];
@@ -520,7 +513,7 @@ export default function App() {
           ? `Esta é a página ${pageNum} de ${allImages.length} de um projeto de móveis planejados. Extraia móveis, cotas e medidas desta página. Identifique o ambiente específico de cada móvel no campo 'ambiente' (ex: 'Sala de Estar', 'Cozinha', 'Suíte', etc.). Se houver carimbo/selo com nome do cliente, endereço e arquiteto, extraia também. Retorne SOMENTE o JSON.`
           : `Analise este projeto técnico de móveis planejados. Extraia peças, cotas e separe por ambiente no campo 'ambiente'. Se houver carimbo, extraia nome do cliente, endereço e arquiteto. Retorne SOMENTE o JSON.`;
       const instruction = contextoJaExtraido
-        ? `${instrucaoBase}\n\nPEÇAS JÁ IDENTIFICADAS EM PÁGINAS ANTERIORES DESTE MESMO PROJETO (NÃO DUPLICAR):\n${contextoJaExtraido}\n\nSe esta página mostrar o MESMO móvel listado acima em outro ângulo, vista interna/explodida, corte, ou com portas abertas revelando gavetas/prateleiras (mesmo ambiente + dimensões parecidas às já listadas), NÃO crie um item novo para ele — retorne em "pecas" só os móveis que ainda NÃO aparecem na lista acima.`
+        ? `${instrucaoBase}\n\nPEÇAS JÁ IDENTIFICADAS EM PÁGINAS ANTERIORES DESTE MESMO PROJETO (NÃO DUPLICAR):\n${contextoJaExtraido}\n\nSe esta página mostrar o MESMO móvel listado acima em outro ângulo, vista interna/explodida, corte, ou com portas abertas revelando gavetas/prateleiras (mesmo código do móvel + mesmo ambiente, sem confundir peças diferentes de tamanho parecido), NÃO crie um item novo para ele — retorne em "pecas" só os móveis novos e em "complementos_modulos" os novos detalhes das vistas de módulos já listados.`
         : instrucaoBase;
 
       try {
@@ -547,6 +540,9 @@ export default function App() {
               _pagina: pageNum,
               ambiente: p.ambiente || pageAmbiente,
               categoria: p.categoria || "",
+              recortes: Array.isArray(p.recortes) ? p.recortes : [],
+              divergencias_cotas: Array.isArray(p.divergencias_cotas) ? p.divergencias_cotas.map(String) : [],
+              codigo_modulo: typeof p.codigo_modulo==='string' ? p.codigo_modulo : null,
               largura: larg,
               altura: alt,
               profundidade: prof,
@@ -557,6 +553,7 @@ export default function App() {
           });
           newPieces.push(...formatted);
         }
+        anexarComplementos(newPieces, parsed.complementos_modulos, pageNum, complementosNaoVinculados);
         if (parsed.formasCompostas?.length) allFormas.push(...parsed.formasCompostas);
         const desc = parsed.descricao ? `${parsed.ambiente || ""} — ${parsed.descricao}` : parsed.ambiente;
         if (desc) ambientParts.push(desc);
@@ -568,6 +565,7 @@ export default function App() {
 
     setAnalyzingProgress(null);
     setPieces(newPieces);
+    setComplementosPendentes(complementosNaoVinculados);
     setFormasCompostas([...new Set(allFormas)]);
     if (ambientParts.length && !ambientDesc) setAmbientDesc([...new Set(ambientParts)].join(" · "));
 
@@ -898,6 +896,7 @@ export default function App() {
         phone: clientPhone,
         notes: ambientDesc,
         pieces: [...pieces],
+        complementosPendentes,
         total: q.total,
         margin,
       },
@@ -1160,7 +1159,8 @@ export default function App() {
       {/* Tabs Navigation */}
       <nav style={{ background: "#110e09", borderBottom: "1px solid #1a1006", padding: "0 10px", display: "flex", overflowX: "auto" }}>
         {[
-          { id: "quote", icon: "📐", label: "Orçamento" },
+          { id: "quote", icon: "📐", label: "Orçamento IA" },
+          { id: "manual", icon: "✏️", label: "Orçamento Manual" },
           { id: "corte", icon: "🪚", label: `Plano de Corte${pieces.length > 0 ? ` (${pieces.length})` : ""}` },
           { id: "construction", icon: "🧱", label: "Banco Construtivo" },
           { id: "training", icon: "🧠", label: "Treinar IA" },
@@ -1522,7 +1522,7 @@ export default function App() {
                       <label htmlFor={fileInputId} className="hb" style={{ background: "rgba(200,137,42,.14)", border: "1px solid rgba(200,137,42,.35)", borderRadius: 8, color: "#c8892a", padding: "8px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-block" }}>
                         🔄 Trocar Arquivo
                       </label>
-                      <button className="hb" onClick={() => { setUploadedFile(null); setPieces([]); setAnalysisError(null); }} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 8, color: "#b05050", padding: "8px 14px", fontSize: 12, cursor: "pointer" }}>
+                      <button className="hb" onClick={() => { setUploadedFile(null); setPieces([]); setComplementosPendentes([]); setAnalysisError(null); }} style={{ background: "rgba(180,50,50,.12)", border: "1px solid rgba(180,50,50,.25)", borderRadius: 8, color: "#b05050", padding: "8px 14px", fontSize: 12, cursor: "pointer" }}>
                         ✕ Remover
                       </button>
                     </div>
@@ -1677,7 +1677,7 @@ export default function App() {
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: "#a07040", marginBottom: 10, lineHeight: 1.6 }}>
-                    Peças no mesmo ambiente com dimensões quase idênticas — geralmente é o mesmo móvel lido duas vezes (ex.: vista frontal + vista interna com portas abertas). Pode ser proposital (ex.: duas peças simétricas), então revise antes de remover.
+                    Itens com o mesmo código no ambiente, ou mesmo nome e medidas, precisam de conferência. Podem ser vistas ou partes distintas do conjunto. Nenhum item é removido automaticamente.
                   </div>
                   <div style={{ display: "grid", gap: 8 }}>
                     {possiveisDuplicatas.map(([a, b], i) => (
@@ -2139,8 +2139,9 @@ export default function App() {
                     <button
                       className="hb"
                       onClick={() => {
-                        setPieces([]);
+                        setPieces([]); setComplementosPendentes([]);
                         setUploadedFile(null);
+    setComplementosPendentes([]);
                         setClientName("");
                         setClientAddress("");
                         setClientPhone("");
@@ -2170,6 +2171,9 @@ export default function App() {
           </div>
         )}
 
+        {/* Aba: Orçamento Manual */}
+        {tab === "manual" && <OrcamentoManual />}
+
         {/* Aba 2: Plano de Corte Otimizado (CorteSmart) */}
         {tab === "corte" && (
           <PlanoCorteView
@@ -2177,6 +2181,8 @@ export default function App() {
             clientName={clientName}
             ambientDesc={ambientDesc}
             onGoToQuote={() => setTab("quote")}
+            onUpdatePiece={updPiece}
+            complementosPendentes={complementosPendentes}
           />
         )}
 
@@ -2342,6 +2348,10 @@ export default function App() {
                       <span style={{ fontSize: 11, color: "#5a4430" }}>{q.pieces?.length || 0} peças</span>
                       <span style={{ fontFamily: "'Playfair Display'", fontSize: 17, color: "#e8aa40", fontWeight: 700 }}>{fmtBRL(q.total)}</span>
                     </div>
+                    {q.pieces?.length>0 && <button style={{marginTop:10,padding:8,cursor:'pointer'}} onClick={e=>{
+                      e.stopPropagation();setPieces(structuredClone(q.pieces));setComplementosPendentes(structuredClone(q.complementosPendentes||[]));
+                      setClientName(q.client||'');setClientAddress(q.address||'');setClientPhone(q.phone||'');setArchitectName('');setAmbientDesc(q.notes||'');setMargin(q.margin||0);setUploadedFile(null);setAnalysisError(null);setFormasCompostas([]);setTab('corte');
+                    }}>Reabrir para conferir o corte</button>}
                     {expandedHistory === q.id && q.pieces?.length > 0 && (
                       <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #1a1006" }}>
                         {q.pieces.map((p, i) => (

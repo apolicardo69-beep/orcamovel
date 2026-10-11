@@ -1,3 +1,5 @@
+> Atualização Fase 1: consulte FASE_1_LEIA_PRIMEIRO.md. O plano legado agora é simulação, com chapas separadas e impressão de produção bloqueada até validação.
+
 # Banco Construtivo V1 — pacote de testes
 
 Esta versão adiciona uma camada nova e isolada ao OrcaMóvel. O motor legado continua disponível; o Banco Construtivo V1 pode ser testado pela nova aba **Banco Construtivo** e por testes automatizados.

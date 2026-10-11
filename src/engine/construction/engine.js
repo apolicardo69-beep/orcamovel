@@ -1,5 +1,5 @@
 import { DEFAULTS, STATUS, SOURCE } from './constants.js';
-import { HARDWARE_CATALOG, BASE_MATERIALS } from './catalogs.js';
+import { HARDWARE_CATALOG, BASE_MATERIALS, METHOD_REGISTRY } from './catalogs.js';
 
 const n = (v, label) => {
   const x = Number(v);
@@ -12,7 +12,7 @@ const pos = (v,label) => { const x=n(v,label); if(x<=0) throw new Error(`${label
 // agrupa tudo como "SEM_MATERIAL" e o plano de corte mistura chapa de 15 com
 // chapa de 6 na mesma otimização — que é justamente o erro que se quer evitar.
 export function materialForThickness(espessura_mm){
-  const alvo = Math.round(Number(espessura_mm));
+  const alvo = Number(espessura_mm);
   return BASE_MATERIALS.find(m => m.espessura_mm === alvo) || null;
 }
 
@@ -62,14 +62,14 @@ export function calculateSinkCabinet(input){
   const boxD=stoneD-recessFront-recessBack;
   if(boxD<=0) throw new Error('Profundidade calculada da caixa inválida.');
 
-  const left=resolveSideFinish({...input.left_finish,position:'LEFT'},T,H,boxD);
-  const right=resolveSideFinish({...input.right_finish,position:'RIGHT'},T,H,boxD);
+  const left=resolveSideFinish({...input.left_finish,position:'LEFT'},T,H,boxD+DEFAULTS.portaAvancoFrontalMm+DEFAULTS.fundoParafusadoMm);
+  const right=resolveSideFinish({...input.right_finish,position:'RIGHT'},T,H,boxD+DEFAULTS.portaAvancoFrontalMm+DEFAULTS.fundoParafusadoMm);
   const bottom=input.bottom_finish || {type:'NONE'};
   let bottomOcc=0, bottomPieces=[];
-  if(bottom.type==='PANEL_SIMPLE'){ bottomOcc=n(bottom.thickness_mm ?? T,'tamponamento inferior'); bottomPieces=[piece('BOTTOM_PANEL','Tamponamento inferior',W,boxD,bottomOcc,1,{role:'ACABAMENTO'})]; }
+  if(bottom.type==='PANEL_SIMPLE'){ bottomOcc=n(bottom.thickness_mm ?? T,'tamponamento inferior'); bottomPieces=[piece('BOTTOM_PANEL','Tamponamento inferior',W,boxD+DEFAULTS.portaAvancoFrontalMm+DEFAULTS.fundoParafusadoMm,bottomOcc,1,{role:'ACABAMENTO'})]; }
   if(bottom.type==='PANEL_THICK'){
     const layer=n(bottom.layer_thickness_mm ?? T,'camada tamponamento inferior'); const layers=Math.max(2,Math.trunc(bottom.layers??2)); bottomOcc=layer*layers;
-    bottomPieces=[piece('BOTTOM_PANEL_THICK','Camada tamponamento inferior engrossado',W,boxD,layer,layers,{role:'ACABAMENTO',assembly:'COLADO'})];
+    bottomPieces=[piece('BOTTOM_PANEL_THICK','Camada tamponamento inferior engrossado',W,boxD+DEFAULTS.portaAvancoFrontalMm+DEFAULTS.fundoParafusadoMm,layer,layers,{role:'ACABAMENTO',assembly:'COLADO'})];
   }
   const boxW=W-left.occupancy_mm-right.occupancy_mm;
   const railT=T;
@@ -164,6 +164,7 @@ export function calculateTower(input){
   const semMedida=zones.some(z=>!z.confirmed);
   const D=Number(input.depth_mm)||0;
   if(!zones.length || semMedida || D<=0){
+    if(!zones.length) result.status=STATUS.INFORMACAO_AUSENTE;
     if(!zones.length) issues.push({code:'TORRE_SEM_ZONAS',message:'Torre sem zonas definidas — informe as zonas (superior, micro, forno, inferior).'});
     if(D<=0) issues.push({code:'TORRE_SEM_PROFUNDIDADE',message:'Profundidade da torre não informada — sem ela não é possível gerar as peças.'});
     if(semMedida&&zones.length) result.status=STATUS.INFORMACAO_AUSENTE;
@@ -241,6 +242,10 @@ export function calculateWardrobe(input){
   if(input.door_type==='CORRER'){
     const tampH=pos(input.tamponamento_height_mm??H,'altura tamponamento');
     result.dimensions.internal_post_height_mm=tampH-DEFAULTS.guardaRoupaCorrerMontanteDescontoMm;
+    if(postQty && result.dimensions.internal_post_height_mm !== boxH-2*T){
+      result.status=STATUS.REVISAO_MANUAL;
+      result.issues=[{code:'CONFLITO_MONTANTE',message:'Altura do montante pela regra do tamponamento diverge do vão da caixa. Confirmar montagem antes de fabricar.'}];
+    }
     const openingH=pos(input.door_opening_height_mm??(H-baseH-topFinish),'vão portas');
     result.dimensions.sliding_door_height_mm=openingH-DEFAULTS.guardaRoupaCorrerPortaDescontoCarrinhoMm;
     const qty=Math.max(2,Math.trunc(input.door_qty??2));
@@ -312,16 +317,26 @@ export function calculateCentralTamponadedBox(input){
   const boxW=pos(input.box_width_mm,'largura caixa'); const boxD=pos(input.box_depth_mm,'profundidade caixa'); const H=pos(input.height_mm,'altura'); const T=pos(input.thickness_mm??15,'espessura');
   const left=n(input.left_finish_mm??T,'tamponamento esquerdo'); const right=n(input.right_finish_mm??T,'tamponamento direito');
   const topD=input.top_depth_mm==null?boxD:Number(input.top_depth_mm);
-  return {method_id:'CAIXA_CENTRAL_TAMPONADA_V1',dimensions:{top_width_mm:boxW+left+right,top_depth_mm:topD},pieces:[piece('CENTRAL_BOX','Caixa central - referência',boxW,boxD,T,1),piece('CENTRAL_TAMP_L','Tamponamento esquerdo',H,boxD,left,1),piece('CENTRAL_TAMP_R','Tamponamento direito',H,boxD,right,1),piece('CENTRAL_TOP','Tampo de cobertura',boxW+left+right,topD,T,1)],assumptions:[{field:'top_depth_mm',value:topD,source:input.top_depth_mm==null?SOURCE.PADRAO_CONSTRUTIVO:SOURCE.PROJETO}],status:input.top_depth_mm==null?STATUS.PADRAO_APLICADO:STATUS.CONFIRMADO};
+  return {method_id:'CAIXA_CENTRAL_TAMPONADA_V1',dimensions:{top_width_mm:boxW+left+right,top_depth_mm:topD},issues:[{code:'CAIXA_INCOMPLETA',message:'Caixa central ainda é referência; falta cadastrar a decomposição estrutural.'}],pieces:[piece('CENTRAL_BOX','Caixa central - referência',boxW,boxD,T,1),piece('CENTRAL_TAMP_L','Tamponamento esquerdo',H,boxD,left,1),piece('CENTRAL_TAMP_R','Tamponamento direito',H,boxD,right,1),piece('CENTRAL_TOP','Tampo de cobertura',boxW+left+right,topD,T,1)],assumptions:[{field:'top_depth_mm',value:topD,source:input.top_depth_mm==null?SOURCE.PADRAO_CONSTRUTIVO:SOURCE.PROJETO}],status:input.top_depth_mm==null?STATUS.PADRAO_APLICADO:STATUS.CONFIRMADO};
 }
 
 export function validateForProduction(result){
   const issues=[];
+  const block=(code,message,piece)=>issues.push({code,message,piece,severity:'critical'});
+  if(!Array.isArray(result?.pieces) || !result.pieces.length) block('SEM_PECAS','Resultado sem peças fabricáveis.');
+  if(![STATUS.CONFIRMADO,STATUS.PADRAO_APLICADO].includes(result?.status)) block('STATUS_BLOQUEANTE','Status exige revisão.');
+  for(const issue of result?.issues||[]) block(issue.code||'PENDENCIA',issue.message||'Pendência construtiva.');
+  // Os métodos atuais estão em validação no catálogo. Não confundir cenário calculado com regra aprovada.
+  if(result?.method_id && METHOD_REGISTRY.find(m=>m.id===result.method_id)?.status!=='VALIDADO') block('METODO_NAO_VALIDADO','Método construtivo ainda não validado para produção.');
+  for(const h of result?.hardware||[]) if(!['VALIDADO','CONFIRMADO'].includes(h.status)) block('FERRAGEM_NAO_VALIDADA','Ferragem exige validação.');
   for(const p of result?.pieces||[]){
-    if(!(p.comprimento_mm>0 && p.largura_mm>0 && p.espessura_mm>0)) issues.push({code:'PECA_INVALIDA',piece:p.id,severity:'critical'});
+    if(![p.comprimento_mm,p.largura_mm,p.espessura_mm].every(v=>Number.isFinite(v)&&v>0) || !Number.isInteger(p.quantidade) || p.quantidade<=0) block('PECA_INVALIDA','Dimensões ou quantidade inválidas.',p.id);
+    if(!p.material_id || ['SEM_MATERIAL','LEGACY_NAO_CLASSIFICADO'].includes(p.material_id)) block('SEM_MATERIAL','Selecione o material da peça.',p.id);
+    const L=p.chapa_comprimento_mm,W=p.chapa_largura_mm;
+    if(!(Number.isFinite(L)&&L>0&&Number.isFinite(W)&&W>0)) block('SEM_CHAPA','Dimensões da chapa ausentes.',p.id);
+    else if(!((p.comprimento_mm<=L&&p.largura_mm<=W) || (p.rotacao_permitida!==false && (!p.veio || p.veio==='qualquer') && p.comprimento_mm<=W&&p.largura_mm<=L))) block('MAIOR_QUE_CHAPA','Peça não cabe na chapa na orientação permitida.',p.id);
   }
-  if(result?.status===STATUS.INFORMACAO_AUSENTE || result?.status===STATUS.REVISAO_MANUAL || result?.status===STATUS.ERRO_PRODUCAO) issues.push({code:'STATUS_BLOQUEANTE',severity:'critical',message:`Status ${result.status} exige revisão.`});
-  return {liberado:!issues.some(i=>i.severity==='critical'),issues};
+  return {liberado:issues.length===0,issues};
 }
 
 export function groupPiecesForCut(pieces){

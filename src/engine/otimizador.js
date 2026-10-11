@@ -29,12 +29,12 @@ export function normalizarPecasParaCorte(pecasOrca) {
   const normalizadas = (pecasOrca || []).flatMap((p, idx) => {
     const production = Number.isFinite(Number(p.comprimento_mm)) && Number.isFinite(Number(p.largura_mm));
     let larg, alt;
-    if (production) { larg = Math.round(Number(p.largura_mm)); alt = Math.round(Number(p.comprimento_mm)); }
-    else if (p.unidade === 'm') { larg = Math.round(Number(p.largura) * 1000); alt = Math.round(Number(p.altura) * 1000); }
+    if (production) { larg = Number(p.largura_mm); alt = Number(p.comprimento_mm); }
+    else if (p.unidade === 'm') { larg = Number(p.largura) * 1000; alt = Number(p.altura) * 1000; }
     else if (p.unidade === 'mm') { larg = Math.round(Number(p.largura)); alt = Math.round(Number(p.altura)); }
     else { invalidas.push({peca:p,motivo:'Unidade não declarada. O motor V2 não adivinha unidades.'}); return []; }
-    const qtd = parseInt(p.quantidade,10) || 1;
-    if (!(larg>0 && alt>0 && qtd>0)) { invalidas.push({peca:p,motivo:'Dimensão ou quantidade inválida.'}); return []; }
+    const qtd = Number(p.quantidade ?? 1);
+    if (!(Number.isFinite(larg) && Number.isFinite(alt) && larg>0 && alt>0 && Number.isInteger(qtd) && qtd>0)) { invalidas.push({peca:p,motivo:'Dimensão ou quantidade inválida.'}); return []; }
     return [{ id:p._id||p.id||String(idx+1), codigo:`P${String(idx+1).padStart(2,'0')}`, nome:p.nome||`Peça ${idx+1}`, largura_mm:larg, comprimento_mm:alt, quantidade:qtd, tipo:p.tipo||'m²', espessura_mm:p.espessura_mm, material_id:p.material_id||'LEGACY_NAO_CLASSIFICADO', rotacao_permitida:p.rotacao_permitida!==false, veio:p.veio||'qualquer', cor:CORES_PECAS[idx%CORES_PECAS.length], _origem:p }];
   });
   normalizadas.invalidas = invalidas;
@@ -44,7 +44,7 @@ export function normalizarPecasParaCorte(pecasOrca) {
 /**
  * Executa a otimização de corte 2D em chapas
  */
-export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
+function otimizarGrupo(pecas, config = CONFIG_PADRAO_CORTE) {
   const chapaL = config.chapa_largura_mm || 2750;
   const chapaA = config.chapa_altura_mm || 1830;
   const kerf = config.kerf_mm !== undefined ? config.kerf_mm : 3;
@@ -53,8 +53,8 @@ export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
   const respeitarVeio = !!config.respeitar_veio;
 
   // Área útil da chapa descontando o refilo de borda
-  const utilL = Math.max(100, chapaL - margem * 2);
-  const utilA = Math.max(100, chapaA - margem * 2);
+  const utilL = chapaL - margem * 2;
+  const utilA = chapaA - margem * 2;
 
   // 1. Expandir peças com quantidade > 1
   const instancias = [];
@@ -261,4 +261,35 @@ function encaixarEmEspaco(peca, instancia, chapa, kerf, rotacionada) {
     }
   }
   return false;
+}
+
+// Otimiza lotes separados: nenhuma chapa pode misturar materiais, espessuras ou padrões.
+export function otimizarCorte(pecas, config = CONFIG_PADRAO_CORTE) {
+  const cfg={...CONFIG_PADRAO_CORTE,...config};
+  if(![cfg.chapa_largura_mm,cfg.chapa_altura_mm].every(v=>Number.isFinite(v)&&v>0) || ![cfg.kerf_mm,cfg.margem_borda_mm].every(v=>Number.isFinite(v)&&v>=0) || cfg.chapa_largura_mm<=2*cfg.margem_borda_mm || cfg.chapa_altura_mm<=2*cfg.margem_borda_mm) throw new Error('Configuração de chapa/serra inválida.');
+  const groups=new Map();
+  for(const p of pecas){
+    if(![p.largura_mm,p.comprimento_mm].every(v=>Number.isFinite(v)&&v>0) || !Number.isInteger(p.quantidade) || p.quantidade<=0) throw new Error('Peça com dimensão ou quantidade inválida.');
+    const key=JSON.stringify([p.material_id||'SEM_MATERIAL',p.espessura_mm||null,p._origem?.padrao||'',p.veio||'qualquer']);
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(p);
+  }
+  const results=[...groups.entries()].map(([key,items])=>({key,result:otimizarGrupo(items,cfg),sample:items[0]}));
+  const chapas=results.flatMap(({key,result,sample})=>result.chapas.map(c=>({...c,grupo:key,material_id:sample.material_id,espessura_mm:sample.espessura_mm})));
+  chapas.forEach((c,i)=>c.indice=i+1);
+  const area=chapas.reduce((a,c)=>a+c.area_total_mm2,0),used=chapas.reduce((a,c)=>a+c.area_usada_mm2,0);
+  return {chapas,total_chapas:chapas.length,total_pecas_posicionadas:results.reduce((a,r)=>a+r.result.total_pecas_posicionadas,0),pecas_nao_posicionadas:results.flatMap(r=>r.result.pecas_nao_posicionadas),aproveitamento_medio_pct:area?Math.round(used/area*100):0,area_usada_m2:used/1e6,area_total_m2:area/1e6,area_desperdicada_m2:(area-used)/1e6,custo_estimado:chapas.length*(cfg.preco_chapa||0)};
+}
+
+export function revisarPlanoCorte({explodir,pecas,resultado}) {
+  const motivos=[];
+  // O legado não possui aprovação rastreável de regras, materiais e ferragens.
+  if(pecas.length) motivos.push('Simulação: o motor por categoria ainda exige conferência construtiva antes da fabricação.');
+  if(explodir.manuais.length) motivos.push('Existem módulos sem método validado. Painéis manuais não substituem a aprovação do módulo.');
+  if(explodir.emendas.length) motivos.push('Há peças maiores que a chapa. Nenhuma emenda foi aplicada automaticamente.');
+  if(pecas.some(p=>p._origem?.profundidade_assumida)) motivos.push('Há medidas assumidas pelo padrão da categoria.');
+  if(pecas.some(p=>!p.espessura_mm || !p.material_id || p.material_id==='LEGACY_NAO_CLASSIFICADO')) motivos.push('Material ou espessura não confirmado em todas as peças.');
+  if(pecas.invalidas?.length) motivos.push('Há dimensões ou quantidades inválidas.');
+  if(!resultado || resultado.pecas_nao_posicionadas.length) motivos.push('O plano não contém todas as peças posicionadas.');
+  return {liberado:motivos.length===0,motivos};
 }

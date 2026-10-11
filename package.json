@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test tests/constructionBank.test.js tests/constructionBankV2.test.js tests/modulacao.test.js",
+    "test": "node --test tests/cobertura.test.js tests/constructionBank.test.js tests/constructionBankV2.test.js tests/interpretacao.test.js tests/modulacao.test.js tests/productionSafety.test.js",
     "test:construction": "node --test tests/constructionBank.test.js tests/constructionBankV2.test.js",
     "test:modulacao": "node --test tests/modulacao.test.js"
   },

@@ -1,3 +1,4 @@
+import { identificarConstrucao, modulosRepetidos } from './interpretacao.js';
 // ============================================================
 // MÉTODOS CONSTRUTIVOS — Decomposição das peças do orçamento em
 // painéis físicos reais de corte (laterais, tampo, base, fundo,
@@ -25,12 +26,8 @@
 //                  ou não é uma peça física (acréscimo percentual) —
 //                  não deve entrar no plano de corte de MDF.
 //
-// LIMITAÇÃO CONHECIDA (documentada, não escondida): nesta versão,
-// peças de fundo (espessura menor, ex. 6mm) entram no MESMO plano de
-// corte das peças estruturais (ex. 15mm) por simplicidade — na
-// prática elas costumam vir de uma chapa mais fina e devem ser
-// cortadas à parte. Cada painel carrega seu "espessura_mm" de origem
-// para o marceneiro conferir antes de mandar cortar.
+// Plano legado é simulação. O otimizador separa espessuras e materiais,
+// mas a aprovação construtiva depende da integração do banco validado.
 // ============================================================
 
 export const CATEGORIAS_PADRAO = [
@@ -214,7 +211,6 @@ const REGEX_MATERIAL_NAO_MADEIRA = /vidro|alum[ií]nio|inox|metal(?!izado)|ferro
 // Peças "ripado" precisam da largura da ripa e do espaçamento. Agora isso vem
 // da configuração da categoria Painel (ou do texto da peça), então dá para
 // gerar as ripas — antes o item inteiro virava alerta manual e saía do corte.
-const REGEX_RIPADO = /ripad|friso/i;
 
 // Só exclui o item quando ele É o material não-madeira ("Espelho", "Tampo de
 // granito"). Quando o material aparece como COMPLEMENTO ("Cristaleira com
@@ -277,10 +273,6 @@ export function aplicarPadroesCategoria(cfg) {
     // Prateleiras extras conforme a altura: um módulo de 2,70 m não tem a
     // mesma quantidade de prateleiras que um de 0,70 m.
     if (c.prateleira_passo_m == null) c.prateleira_passo_m = 0.45;
-  }
-  if (c.estrategia === "painel_simples") {
-    if (c.ripa_largura_m == null) c.ripa_largura_m = 0.05;
-    if (c.ripa_espacamento_m == null) c.ripa_espacamento_m = 0.02;
   }
   return c;
 }
@@ -374,7 +366,9 @@ export function decomporPeca(peca, metodosConfig) {
     return { status: "excluido", motivo: "Item percentual (acréscimo, ex.: canto arredondado) — não é uma peça física de corte." };
   }
 
-  const categoria = peca.categoria || inferirCategoriaPorNome(peca.nome);
+  const construcao=identificarConstrucao(peca);
+  if(construcao.pendencias.length) return {status:'manual',motivo:construcao.pendencias.join(' ')};
+  const categoria = construcao.tipo.startsWith('PAINEL_') ? 'Painel' : peca.categoria || inferirCategoriaPorNome(peca.nome);
   const cfg = aplicarPadroesCategoria(config[categoria]);
   if (!cfg) {
     return {
@@ -394,24 +388,24 @@ export function decomporPeca(peca, metodosConfig) {
     if (peca.tipo !== "m²" || larguraM <= 0 || alturaM <= 0) {
       return { status: "manual", motivo: "Painel sem largura/altura completas para gerar o retângulo de corte." };
     }
-    // Painel ripado/frisado: as ripas são cortadas uma a uma. A largura da ripa
-    // e o espaçamento vêm da configuração da categoria Painel — como você disse,
-    // "é só ler a medida que estipular em cada projeto".
-    if (REGEX_RIPADO.test(`${peca.nome} ${peca.observacao || ""}`)) {
-      const ripaW = parseFloat(cfg.ripa_largura_m) || 0;
-      const gap = parseFloat(cfg.ripa_espacamento_m);
+    // Ripado exige parâmetros explícitos do módulo; frisos seguem revisão específica.
+    if (construcao.tipo==='PAINEL_RIPADO') {
+      const ripaW = Number(peca.ripa_largura_mm)/1000;
+      const gap = peca.ripa_espacamento_mm==null || peca.ripa_espacamento_mm==='' ? NaN : Number(peca.ripa_espacamento_mm)/1000;
       if (!(ripaW > 0) || !(gap >= 0)) {
-        return { status: "manual", motivo: "Painel ripado sem largura de ripa/espaçamento configurados na categoria Painel." };
+        return { status: "manual", motivo: "Informe largura e espaçamento das ripas neste módulo; o padrão antigo 50/20 não é aplicado automaticamente." };
       }
+      if(!(Number(peca.ripa_espessura_mm)>0) || typeof peca.ripado_tem_base!=='boolean' || (peca.ripado_tem_base && !(Number(peca.base_espessura_mm)>0))) return {status:'manual',motivo:'Informe espessura das ripas e se existe base; informe a espessura da base quando aplicável.'};
+      if(ripaW>larguraM) return {status:'manual',motivo:'Ripa maior que a largura do painel.'};
       const passo = ripaW + gap;
       const nRipas = Math.max(1, Math.floor((larguraM + gap) / passo));
       return {
         status: "ok",
         paineis: [
-          painel(`${peca.nome} — Base do painel ripado`, larguraM, alturaM, qtd, cfg.espessura_mm, false),
-          painel(`${peca.nome} — Ripa`, ripaW, alturaM, nRipas * qtd, cfg.espessura_mm, false),
+          ...(peca.ripado_tem_base ? [painel(`${peca.nome} — Base do painel ripado`, larguraM, alturaM, qtd, Number(peca.base_espessura_mm), false)] : []),
+          painel(`${peca.nome} — Ripa`, ripaW, alturaM, nRipas * qtd, Number(peca.ripa_espessura_mm), false),
         ],
-        aviso: `Painel ripado: ${nRipas} ripas de ${(ripaW * 100).toFixed(1)}cm com ${(gap * 100).toFixed(1)}cm de espaçamento, conforme configurado na categoria Painel. Ajuste lá se o projeto usar outra medida.`,
+        aviso: `Painel ripado: ${nRipas} ripas de ${(ripaW * 100).toFixed(1)}cm com ${(gap * 100).toFixed(1)}cm de espaçamento, conforme informado neste módulo. Montagem e emendas ainda exigem conferência.`,
       };
     }
     return {
@@ -434,7 +428,7 @@ export function decomporPeca(peca, metodosConfig) {
     // Aqui "qtd" representa os metros lineares cobrados (comprimento da prateleira).
     return {
       status: "ok",
-      paineis: [painel(peca.nome, profM, qtd, 1, cfg.espessura_mm, profAssumida)],
+      paineis: [painel(peca.nome, profM, parseFloat(peca.quantidade), 1, cfg.espessura_mm, profAssumida)],
     };
   }
 
@@ -446,7 +440,7 @@ export function decomporPeca(peca, metodosConfig) {
     // inteiro — num orçamento real isso sozinho derrubava vários módulos.
     let largEfetiva = larguraM;
     let altEfetiva = alturaM;
-    let qtdModulos = qtd;
+    let qtdModulos = peca.tipo === "ml" ? 1 : qtd;
     let dimsAssumidas = false;
     if (peca.tipo === "ml" && larguraM <= 0) {
       const compr = parseFloat(peca.quantidade) || 0;
@@ -459,7 +453,7 @@ export function decomporPeca(peca, metodosConfig) {
     }
 
     const temDimsCompletas = largEfetiva > 0 && altEfetiva > 0;
-    const podeDecompor = temDimsCompletas && (peca.tipo === "m²" || peca.tipo === "unidade" || dimsAssumidas);
+    const podeDecompor = temDimsCompletas && (["m²", "unidade", "un", "ml"].includes(peca.tipo) || dimsAssumidas);
     if (!podeDecompor) {
       return {
         status: "manual",
@@ -658,7 +652,9 @@ export function explodirPecasConstrutivas(pieces, metodosConfig, chapa) {
   const ferragens = [];
   const emendas = [];
 
+  const repetidos=new Set(modulosRepetidos(pieces||[]).flat());
   for (const p of pieces || []) {
+    if(repetidos.has(p)) {manuais.push({pecaId:p._id??p.id,nome:p.nome,categoria:p.categoria,motivo:`Código ${p.codigo_modulo} repetido no ambiente ${p.ambiente}. Conferir vistas/partes do conjunto antes de gerar peças.`});continue;}
     const r = decomporPeca(p, metodosConfig);
     if (r.status === "ok") {
       r.paineis.forEach((pn, idx) => {
@@ -673,28 +669,11 @@ export function explodirPecasConstrutivas(pieces, metodosConfig, chapa) {
           profundidade_assumida: pn.profundidade_assumida,
           unidade: "m",
         };
-        // Peça maior que a chapa: divide em partes emendadas em vez de sumir
-        // do plano de corte — era isso que apagava os painéis de parede
-        // grandes, justamente os itens mais caros do orçamento.
+        // Peça maior que a chapa permanece inteira e exige regra de emenda.
         const div = dividirEmChapa(pn.largura_m, pn.altura_m, chapa);
         if (div) {
-          emendas.push({
-            pecaId: p._id ?? p.id,
-            nome: pn.nome,
-            original_largura_m: pn.largura_m,
-            original_altura_m: pn.altura_m,
-            partes: div.partes,
-            parte_largura_m: Math.round(div.largura_m * 1000) / 1000,
-            parte_altura_m: Math.round(div.altura_m * 1000) / 1000,
-          });
-          paraCorte.push({
-            ...base,
-            nome: `${pn.nome} — parte emendada (${div.nc}×${div.nr})`,
-            largura: div.largura_m,
-            altura: div.altura_m,
-            quantidade: pn.quantidade * div.partes,
-          });
-          return;
+          emendas.push({pecaId:p._id??p.id,nome:pn.nome,original_largura_m:pn.largura_m,original_altura_m:pn.altura_m});
+          // Mantém a peça inteira. Uma regra de emenda precisa definir montagem e posição.
         }
         paraCorte.push({
           ...base,

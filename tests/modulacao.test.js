@@ -115,7 +115,7 @@ test('item por metro linear gera módulos em vez de virar alerta manual', () => 
 });
 
 test('painel ripado gera as ripas em vez de virar alerta manual', () => {
-  const r = decomporPeca(peca({ nome: 'Painel ripado', largura: 1.54, altura: 4.58 }), DEFAULT_METODOS_CONSTRUTIVOS);
+  const r = decomporPeca(peca({ nome: 'Painel ripado', largura: 1.54, altura: 4.58, ripa_largura_mm:50,ripa_espacamento_mm:20,ripa_espessura_mm:15,ripado_tem_base:true,base_espessura_mm:15 }), DEFAULT_METODOS_CONSTRUTIVOS);
   assert.equal(r.status, 'ok');
   // passo 0,07 -> (1,54 + 0,02) / 0,07 = 22 ripas
   assert.equal(painelDe(r, /Ripa/).quantidade, 22);
@@ -174,7 +174,7 @@ test('painel de parede maior que a chapa é dividido em partes emendadas', () =>
   assert.ok(cabe(d.largura_m, d.altura_m), 'cada parte tem de caber na chapa');
 });
 
-test('nenhuma peça do orçamento fica de fora do plano de corte', () => {
+test('peças grandes permanecem inteiras e são reportadas sem emenda automática', () => {
   const itens = [
     { nome: 'Painel MDF Areia Guararapes', tipo: 'm²', largura: 2.25, altura: 4.59 },
     { nome: 'Painel de parede liso', tipo: 'm²', largura: 2.87, altura: 2.80 },
@@ -187,6 +187,8 @@ test('nenhuma peça do orçamento fica de fora do plano de corte', () => {
   assert.ok(ex.emendas.length >= 2);
 
   const res = otimizarCorte(normalizarPecasParaCorte(ex.paraCorte), CONFIG_PADRAO_CORTE);
-  assert.equal(res.pecas_nao_posicionadas.length, 0, 'nenhuma peça pode ficar sem chapa');
+  assert.equal(res.pecas_nao_posicionadas.length, 2, 'peças grandes devem exigir revisão');
+  assert.equal(res.total_pecas_posicionadas + res.pecas_nao_posicionadas.length, ex.paraCorte.reduce((n,p)=>n+p.quantidade,0));
+  assert.ok(ex.paraCorte.every(p=>!p.nome.includes('parte emendada')));
   assert.ok(res.total_chapas > 0);
 });

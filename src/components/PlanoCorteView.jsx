@@ -1,9 +1,12 @@
+import RevisaoConstrutiva from './RevisaoConstrutiva';
+import {agruparNaoPosicionadas,formatarMm,coberturaDoCorte} from '../engine/interpretacao.js';
 import { useState, useMemo } from "react";
 import ChapaViewer from "./ChapaViewer";
 import {
   CONFIG_PADRAO_CORTE,
   normalizarPecasParaCorte,
   otimizarCorte,
+  revisarPlanoCorte,
 } from "../engine/otimizador";
 import {
   DEFAULT_METODOS_CONSTRUTIVOS,
@@ -55,7 +58,7 @@ function ManualPanelForm({ onAdd }) {
   );
 }
 
-export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoToQuote }) {
+export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoToQuote, onUpdatePiece, complementosPendentes=[] }) {
   const [config, setConfig] = useState(() => {
     try {
       const saved = localStorage.getItem("om_corte_config_v1");
@@ -123,7 +126,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
   // (método construtivo por categoria) — em vez de tratar a linha do
   // orçamento (ex.: "corpo do armário m²") como se já fosse um retângulo.
   // A medida útil da chapa entra na decomposição para que painéis maiores que
-  // a chapa sejam divididos em partes emendadas em vez de sumirem do plano.
+  // a chapa sejam identificados para revisão, sem criar emendas.
   const chapaUtil = useMemo(() => ({
     util_largura_m: Math.max(0.1, ((config.chapa_largura_mm || 2750) - 2 * (config.margem_borda_mm || 0)) / 1000),
     util_altura_m: Math.max(0.1, ((config.chapa_altura_mm || 1830) - 2 * (config.margem_borda_mm || 0)) / 1000),
@@ -143,6 +146,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
             id: `manual_${m.pecaId}_${mp._mid}`,
             _id: `manual_${m.pecaId}_${mp._mid}`,
             nome: mp.nome || m.nome,
+            _origemPecaId: m.pecaId,
             tipo: "m²",
             largura: l,
             altura: a,
@@ -168,9 +172,17 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
   // O motor de corte só roda quando todas as peças possuem unidade explícita e dimensões válidas.
   const resultado = useMemo(() => {
     if (pecasInvalidas.length > 0 || pecasCorte.length === 0) return null;
-    return otimizarCorte(pecasCorte, config);
+    try { return otimizarCorte(pecasCorte, config); } catch { return null; }
   }, [pecasCorte, pecasInvalidas.length, config]);
 
+  const revisao = revisarPlanoCorte({explodir,pecas:pecasCorte,resultado});
+
+  const cobertura=coberturaDoCorte(pieces,explodir,pecasCorte,resultado,complementosPendentes);
+  const exportarDiagnostico=()=>{
+    const payload={versao:'revisao3',pieces,config,metodosConfig,manualPanels,complementosPendentes,cobertura};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));
+    const a=document.createElement('a');a.href=url;a.download='OrcaMovel_Diagnostico.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
   const chapaAtual = resultado?.chapas?.[selectedChapaIndex] || resultado?.chapas?.[0];
 
   const IS = {
@@ -207,7 +219,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
       >
         <div>
           <div style={{ fontFamily: "'Playfair Display'", fontSize: 24, fontWeight: 700 }}>
-            🪚 Plano de Corte Otimizado
+            🪚 Simulação do Plano de Corte
           </div>
           <div style={{ fontSize: 13, color: "#8a6a40", marginTop: 2 }}>
             {clientName ? `Cliente: ${clientName}` : "Projeto"} {ambientDesc ? `· ${ambientDesc}` : ""} · Algoritmo Guillotine 2D para Seccionadora
@@ -493,6 +505,19 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
         </div>
       )}
 
+      <div style={{padding:16,border:'1px solid #d88950',borderRadius:10,marginBottom:16}}>
+        <strong>Total de chapas para compra: não determinado</strong>
+        <p>{cobertura.simulados} de {cobertura.total} itens de madeira do orçamento têm todas as peças geradas posicionadas na simulação. {cobertura.pendentes} itens ainda estão pendentes ou incompletos.</p>
+        <p>{resultado?.total_chapas||0} chapas correspondem somente às peças posicionadas. Itens sem decomposição e peças fora da chapa não entram nessa quantidade.</p>
+        <details><summary>Ver situação de cada item do orçamento</summary><div style={{overflowX:'auto'}}><table style={{width:'100%',fontSize:12,textAlign:'left'}}><thead><tr><th>Ambiente / item</th><th>Situação</th><th>Peças geradas / posicionadas</th><th>Motivo</th></tr></thead><tbody>{cobertura.rows.map((r,i)=><tr key={i}><td>{r.ambiente} · {r.codigo} · {r.nome}</td><td>{{FORA_MDF:'Fora do MDF',PENDENTE:'Revisão necessária',SEM_PECAS:'Sem peças',SEM_PLANO:'Sem simulação',PARCIAL:'Parte fora da chapa',SIMULADO:'Simulado; não validado'}[r.status]}</td><td>{r.geradas} / {r.posicionadas}</td><td>{r.motivo}</td></tr>)}</tbody></table></div></details>
+        <button onClick={exportarDiagnostico} style={{marginTop:12,padding:8,cursor:'pointer'}}>Exportar diagnóstico da leitura</button>
+      </div>
+      {!revisao.liberado && <div role="alert" style={{background:'#29150d',border:'1px solid #d88950',padding:16,borderRadius:10,marginBottom:16}}>
+        <strong>Produção bloqueada — revisão necessária</strong>
+        <ul>{revisao.motivos.map(m=><li key={m}>{m}</li>)}</ul>
+      </div>}
+      {complementosPendentes.length>0 && <details style={{padding:14,border:'1px solid #d88950',marginBottom:12}}><summary>Vistas sem vínculo confirmado ({complementosPendentes.length}) — revisar código e ambiente</summary><pre style={{whiteSpace:'pre-wrap'}}>{JSON.stringify(complementosPendentes,null,2)}</pre></details>}
+      <RevisaoConstrutiva pieces={pieces||[]} onUpdate={onUpdatePiece}/>
       {/* Avisos e itens fora do plano automático */}
       {(explodir.avisos.length > 0 || explodir.excluidos.length > 0) && (
         <div style={{ marginBottom: 16, display: "grid", gap: 10 }}>
@@ -519,21 +544,20 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
         </div>
       )}
 
-      {/* Painéis maiores que a chapa, divididos em partes emendadas */}
+      {/* Peças maiores que a chapa aguardam regra de emenda */}
       {explodir.emendas.length > 0 && (
         <div style={{ background: "#151005", border: "1px solid #4a3a10", borderRadius: 14, padding: "14px 18px", marginBottom: 20 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#e8aa40", marginBottom: 4 }}>
-            🧩 Painéis emendados ({explodir.emendas.length}) — maiores que a chapa
+            🧩 Peças sem regra de emenda ({explodir.emendas.length}) — maiores que a chapa
           </div>
           <div style={{ fontSize: 11, color: "#a08040", marginBottom: 10, lineHeight: 1.5 }}>
-            Estes painéis não cabem inteiros numa chapa de {config.chapa_largura_mm}×{config.chapa_altura_mm}mm, então foram divididos nas partes abaixo. Confira onde a emenda vai cair antes de cortar — em painel aparente a posição da emenda importa.
+            Estes painéis não cabem inteiros numa chapa de {config.chapa_largura_mm}×{config.chapa_altura_mm}mm, e foram mantidos inteiros. Cadastre e valide a montagem e a posição da emenda antes de fabricar.
           </div>
           <div style={{ display: "grid", gap: 4 }}>
             {explodir.emendas.map((e, i) => (
               <div key={i} style={{ fontSize: 12, color: "#c0b090" }}>
                 <strong style={{ color: "#e0d0b0" }}>{e.nome}</strong>{" "}
-                {e.original_largura_m.toFixed(2)}×{e.original_altura_m.toFixed(2)}m →{" "}
-                <strong style={{ color: "#e8aa40" }}>{e.partes} partes</strong> de {e.parte_largura_m.toFixed(2)}×{e.parte_altura_m.toFixed(2)}m
+                {e.original_largura_m.toFixed(2)}×{e.original_altura_m.toFixed(2)}m — revisão manual necessária
               </div>
             ))}
           </div>
@@ -584,7 +608,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
             </span>
           </div>
           <div style={{ fontSize: 12, color: "#a08040", marginBottom: 12, lineHeight: 1.5 }}>
-            O sistema não conseguiu decompor estas peças automaticamente em painéis de corte. Informe os painéis manualmente abaixo (medidas já em metros) para que entrem no plano de corte.
+            O sistema não conseguiu decompor estas peças automaticamente em painéis de corte. Informe os painéis manualmente abaixo (medidas já em metros) para simulação. A liberação de produção depende de validar o módulo e os materiais.
           </div>
           <div style={{ display: "grid", gap: 12 }}>
             {manuaisPendentes.map((m) => (
@@ -602,7 +626,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
       {explodir.manuais.length > manuaisPendentes.length && (
         <div style={{ background: "#0f150f", border: "1px solid #2a3a1e", borderRadius: 14, padding: "14px 18px", marginBottom: 20 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#8aca58", marginBottom: 10 }}>
-            ✅ Peças com painéis inseridos manualmente ({explodir.manuais.length - manuaisPendentes.length})
+            📝 Painéis manuais aguardando validação ({explodir.manuais.length - manuaisPendentes.length})
           </div>
           <div style={{ display: "grid", gap: 8 }}>
             {explodir.manuais
@@ -628,8 +652,8 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
           <div style={{ fontSize: 13, fontWeight: 700, color: "#e07070", marginBottom: 8 }}>
             🚫 Peças maiores que a chapa ({resultado.pecas_nao_posicionadas.length}) — não foram posicionadas
           </div>
-          {resultado.pecas_nao_posicionadas.map((n, i) => (
-            <div key={i} style={{ fontSize: 12, color: "#c09090" }}>{n.motivo}</div>
+          {agruparNaoPosicionadas(resultado.pecas_nao_posicionadas).map((n, i) => (
+            <details key={i} style={{fontSize:12,color:"#c09090",marginBottom:8}}><summary>{n.quantidade} × {n.peca.nome} — {formatarMm(n.peca.largura_mm)} × {formatarMm(n.peca.comprimento_mm)} mm</summary><p>Não cabe na área útil da chapa nas orientações permitidas. Conferir medidas e regra de divisão do módulo.</p></details>
           ))}
         </div>
       )}
@@ -684,7 +708,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
           >
             <div style={{ background: "#110e09", border: "1px solid #22170b", borderRadius: 12, padding: "14px 16px" }}>
               <div style={{ fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>
-                Total de Chapas MDF
+                {cobertura.completa ? "Chapas da simulação" : "Chapas da parte simulada"}
               </div>
               <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 32, fontWeight: 700, color: "#e8aa40", marginTop: 2 }}>
                 {resultado?.total_chapas || 0} <span style={{ fontSize: 14, color: "#7a6040", fontWeight: 400 }}>chapa(s)</span>
@@ -710,7 +734,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
                 {resultado?.aproveitamento_medio_pct || 0}%
               </div>
               <div style={{ fontSize: 11, color: "#6a5038", marginTop: 2 }}>
-                Área útil: {resultado?.area_usada_m2} m² de {resultado?.area_total_m2} m²
+                Área ocupada: {formatarMm(resultado?.area_usada_m2||0)} m² de {formatarMm(resultado?.area_total_m2||0)} m²
               </div>
             </div>
 
@@ -719,7 +743,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
                 Sobras / Desperdício
               </div>
               <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 32, fontWeight: 700, color: "#c0b090", marginTop: 2 }}>
-                {resultado?.area_desperdicada_m2 || 0} <span style={{ fontSize: 14, color: "#7a6040", fontWeight: 400 }}>m²</span>
+                {formatarMm(resultado?.area_desperdicada_m2 || 0)} <span style={{ fontSize: 14, color: "#7a6040", fontWeight: 400 }}>m²</span>
               </div>
               <div style={{ fontSize: 11, color: "#6a5038", marginTop: 2 }}>
                 {resultado?.total_pecas_posicionadas || 0} peças posicionadas
@@ -729,7 +753,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
             {config.preco_chapa > 0 && (
               <div style={{ background: "#110e09", border: "1px solid #22170b", borderRadius: 12, padding: "14px 16px" }}>
                 <div style={{ fontSize: 10, color: "#8a6a40", textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>
-                  Custo Estimado Chapas
+                  Custo apenas das chapas simuladas
                 </div>
                 <div style={{ fontFamily: "'Barlow Condensed'", fontSize: 30, fontWeight: 700, color: "#90d060", marginTop: 2 }}>
                   {fmtBRL(resultado?.custo_estimado)}
@@ -783,7 +807,7 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
                         transition: "all .2s",
                       }}
                     >
-                      Chapa {ch.indice} ({ch.aproveitamento_pct}%)
+                      Chapa {ch.indice} · {ch.espessura_mm || "?"} mm ({ch.aproveitamento_pct}%)
                     </button>
                   );
                 })}
@@ -820,7 +844,9 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
                 Lista Técnica de Corte das Peças ({pecasCorte.length})
               </span>
               <button
-                onClick={() => window.print()}
+                disabled={!revisao.liberado}
+                title={revisao.liberado ? "Imprimir mapa" : "Conclua a validação construtiva antes de imprimir para produção"}
+                onClick={() => { if(revisao.liberado) window.print(); }}
                 style={{
                   background: "rgba(200,137,42,.12)",
                   border: "1px solid rgba(200,137,42,.3)",
@@ -894,10 +920,10 @@ export default function PlanoCorteView({ pieces, clientName, ambientDesc, onGoTo
                           {p._origem?.espessura_mm ? `${p._origem.espessura_mm}mm` : "—"}
                         </td>
                         <td style={{ padding: "8px 12px", fontFamily: "'Barlow Condensed'", fontSize: 14, fontWeight: 700, color: "#d4952e" }}>
-                          {p.largura_mm} mm
+                          {formatarMm(p.largura_mm)} mm
                         </td>
                         <td style={{ padding: "8px 12px", fontFamily: "'Barlow Condensed'", fontSize: 14, fontWeight: 700, color: "#d4952e" }}>
-                          {p.comprimento_mm} mm
+                          {formatarMm(p.comprimento_mm)} mm
                         </td>
                         <td style={{ padding: "8px 12px", fontFamily: "'Barlow Condensed'", fontSize: 14, fontWeight: 600, color: "#f0e0c8" }}>
                           {p.quantidade} un
